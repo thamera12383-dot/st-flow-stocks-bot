@@ -1,7 +1,17 @@
 const TelegramBot = require('node-telegram-bot-api');
+const { createClient } = require('@supabase/supabase-js');
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 const API_KEY = process.env.MASSIVE_API_KEY;
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
+  .split(',')
+  .map(x => x.trim())
+  .filter(Boolean);
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 const userCooldown = new Map();
 const CACHE = new Map();
@@ -11,6 +21,163 @@ const USER_COOLDOWN_SECONDS = 10;
 const CACHE_SECONDS = 60;
 const UPDATE_INTERVAL_MS = 60 * 1000;
 const UPDATE_DURATION_MS = 5 * 60 * 1000;
+
+// =====================
+// Subscription System
+// =====================
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function addDaysIso(days) {
+  const d = new Date();
+  d.setDate(d.getDate() + Number(days));
+  return d.toISOString();
+}
+
+function formatDate(v) {
+  if (!v) return 'غير متوفر';
+  return new Date(v).toLocaleString('ar-SA', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function isAdmin(chatId) {
+  return ADMIN_IDS.includes(String(chatId));
+}
+
+function generateCode() {
+  const part1 = Math.random().toString(36).substring(2, 6).toUpperCase();
+  const part2 = Math.random().toString(36).substring(2, 6).toUpperCase();
+  return `ST-${part1}-${part2}`;
+}
+
+async function createActivationCode(days = 30) {
+  const code = generateCode();
+  const expiresAt = addDaysIso(days);
+
+  const { error } = await supabase
+    .from('activation_codes')
+    .insert({
+      code,
+      used: false,
+      expires_at: expiresAt
+    });
+
+  if (error) throw error;
+
+  return { code, days, expiresAt };
+}
+
+async function getUserAccess(chatId) {
+  const { data, error } = await supabase
+    .from('users_access')
+    .select('*')
+    .eq('telegram_id', String(chatId))
+    .single();
+
+  if (error && error.code !== 'PGRST116') throw error;
+  return data || null;
+}
+
+async function hasActiveAccess(chatId) {
+  const user = await getUserAccess(chatId);
+
+  if (!user) return false;
+  if (!user.active) return false;
+  if (!user.expires_at) return false;
+
+  return new Date(user.expires_at).getTime() > Date.now();
+}
+
+async function requireAccess(chatId) {
+  const ok = await hasActiveAccess(chatId);
+
+  if (ok) return true;
+
+  await bot.sendMessage(
+    chatId,
+`🔒 البوت مخصص للمشتركين فقط.
+
+لتفعيل اشتراكك اكتب:
+
+/redeem الكود
+
+مثال:
+/redeem ST-ABCD-1234`
+  );
+
+  return false;
+}
+
+async function redeemCode(chatId, username, code) {
+  const cleanCode = String(code || '').trim().toUpperCase();
+
+  const { data: activation, error } = await supabase
+    .from('activation_codes')
+    .select('*')
+    .eq('code', cleanCode)
+    .single();
+
+  if (error || !activation) {
+    return { ok: false, message: '❌ كود التفعيل غير صحيح.' };
+  }
+
+  if (activation.used) {
+    return { ok: false, message: '⚠️ هذا الكود تم استخدامه مسبقًا.' };
+  }
+
+  const expiresAt = addDaysIso(30);
+
+  const { error: updateCodeError } = await supabase
+    .from('activation_codes')
+    .update({
+      used: true,
+      telegram_id: String(chatId),
+      activated_at: nowIso(),
+      expires_at: expiresAt
+    })
+    .eq('code', cleanCode)
+    .eq('used', false);
+
+  if (updateCodeError) throw updateCodeError;
+
+  const { error: upsertError } = await supabase
+    .from('users_access')
+    .upsert(
+      {
+        telegram_id: String(chatId),
+        code_used: cleanCode,
+        expires_at: expiresAt,
+        active: true
+      },
+      { onConflict: 'telegram_id' }
+    );
+
+  if (upsertError) throw upsertError;
+
+  return {
+    ok: true,
+    message:
+`✅ تم تفعيل اشتراكك بنجاح.
+
+مدة الاشتراك: 30 يوم
+ينتهي في:
+${formatDate(expiresAt)}
+
+اكتب الآن رمز الشركة مثل:
+TSLA`
+  };
+}
+
+// =====================
+// Helpers
+// =====================
 
 function fmt(n) {
   if (n === undefined || n === null || isNaN(Number(n))) return 'غير متوفر';
@@ -93,9 +260,7 @@ function scoreContract(item) {
 }
 
 async function apiGet(url) {
-  if (!API_KEY) {
-    throw new Error('Missing MASSIVE_API_KEY');
-  }
+  if (!API_KEY) throw new Error('Missing MASSIVE_API_KEY');
 
   const res = await fetch(url);
   const data = await res.json();
@@ -301,13 +466,8 @@ ${bias}
 function clearUpdate(chatId) {
   const active = activeUpdates.get(chatId);
 
-  if (active?.intervalId) {
-    clearInterval(active.intervalId);
-  }
-
-  if (active?.timeoutId) {
-    clearTimeout(active.timeoutId);
-  }
+  if (active?.intervalId) clearInterval(active.intervalId);
+  if (active?.timeoutId) clearTimeout(active.timeoutId);
 
   activeUpdates.delete(chatId);
 }
@@ -336,6 +496,9 @@ function startAutoUpdate(chatId, symbol) {
 
 async function sendFlow(chatId, symbol) {
   try {
+    const access = await requireAccess(chatId);
+    if (!access) return;
+
     const check = canRequest(chatId);
 
     if (!check.ok) {
@@ -393,12 +556,21 @@ MASSIVE_API_KEY`
   }
 }
 
+// =====================
+// Bot Commands
+// =====================
+
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
 `🚀 مرحبًا بك في ST Flow Stocks
 
-فقط اكتب رمز الشركة مباشرة:
+🔒 البوت مخصص للمشتركين فقط.
+
+لتفعيل اشتراكك:
+/redeem CODE
+
+بعد التفعيل اكتب رمز الشركة مباشرة:
 
 TSLA
 AAPL
@@ -407,14 +579,87 @@ AMD
 SPY
 QQQ
 
-وسيتم عرض:
-🟢 أعلى عقود CALL
-🔴 أعلى عقود PUT
-📂 العقود المفتوحة OI
-📦 الحجم
-🔥 أقوى تمركز
-📍 الغلبة الحالية`
+لمعرفة حالة اشتراكك:
+/status`
   );
+});
+
+bot.onText(/\/myid/, (msg) => {
+  bot.sendMessage(msg.chat.id, `🆔 Telegram ID:\n${msg.chat.id}`);
+});
+
+bot.onText(/\/redeem (.+)/, async (msg, match) => {
+  try {
+    const result = await redeemCode(
+      msg.chat.id,
+      msg.from?.username || '',
+      match[1]
+    );
+
+    await bot.sendMessage(msg.chat.id, result.message);
+  } catch (err) {
+    console.error(err);
+    await bot.sendMessage(msg.chat.id, `حدث خطأ أثناء التفعيل:\n${err.message}`);
+  }
+});
+
+bot.onText(/\/status/, async (msg) => {
+  try {
+    const sub = await getUserAccess(msg.chat.id);
+
+    if (!sub) {
+      await bot.sendMessage(
+        msg.chat.id,
+`🔒 لا يوجد اشتراك فعال.
+
+للتفعيل:
+/redeem CODE`
+      );
+      return;
+    }
+
+    const active = await hasActiveAccess(msg.chat.id);
+
+    await bot.sendMessage(
+      msg.chat.id,
+`${active ? '✅ اشتراكك فعال' : '❌ اشتراكك منتهي'}
+
+الكود المستخدم: ${sub.code_used || 'غير متوفر'}
+ينتهي في:
+${formatDate(sub.expires_at)}`
+    );
+  } catch (err) {
+    console.error(err);
+    await bot.sendMessage(msg.chat.id, `حدث خطأ:\n${err.message}`);
+  }
+});
+
+bot.onText(/\/gencode(?:\s+(\d+))?/, async (msg, match) => {
+  try {
+    if (!isAdmin(msg.chat.id)) {
+      await bot.sendMessage(msg.chat.id, '⛔ هذا الأمر مخصص للأدمن فقط.');
+      return;
+    }
+
+    const days = Number(match[1] || 30);
+    const result = await createActivationCode(days);
+
+    await bot.sendMessage(
+      msg.chat.id,
+`✅ تم إنشاء كود جديد
+
+الكود:
+${result.code}
+
+المدة: ${days} يوم
+
+أرسله للعميل بهذا الشكل:
+/redeem ${result.code}`
+    );
+  } catch (err) {
+    console.error(err);
+    await bot.sendMessage(msg.chat.id, `حدث خطأ أثناء إنشاء الكود:\n${err.message}`);
+  }
 });
 
 bot.onText(/\/help/, (msg) => {
@@ -422,8 +667,10 @@ bot.onText(/\/help/, (msg) => {
     msg.chat.id,
 `❓ طريقة الاستخدام
 
-اكتب فقط رمز الشركة مثل:
+1) فعّل الاشتراك:
+/redeem CODE
 
+2) اكتب رمز الشركة:
 TSLA
 AAPL
 NVDA
@@ -431,27 +678,22 @@ AMD
 SPY
 QQQ
 
-لإيقاف التحديث:
- /stop`
+3) حالة الاشتراك:
+/status
+
+4) إيقاف التحديث:
+/stop`
   );
 });
 
 bot.onText(/\/stop/, (msg) => {
   clearUpdate(msg.chat.id);
-
-  bot.sendMessage(
-    msg.chat.id,
-    '🛑 تم إيقاف التحديثات.'
-  );
+  bot.sendMessage(msg.chat.id, '🛑 تم إيقاف التحديثات.');
 });
 
 bot.onText(/\/change/, (msg) => {
   clearUpdate(msg.chat.id);
-
-  bot.sendMessage(
-    msg.chat.id,
-    '🔄 اكتب رمز شركة جديد.'
-  );
+  bot.sendMessage(msg.chat.id, '🔄 اكتب رمز شركة جديد.');
 });
 
 bot.on('message', async (msg) => {
@@ -461,7 +703,6 @@ bot.on('message', async (msg) => {
   if (text.startsWith('/')) return;
 
   const symbol = text.trim().toUpperCase();
-
   const valid = /^[A-Z]{1,5}$/.test(symbol);
 
   if (!valid) {
@@ -484,4 +725,4 @@ QQQ`
   sendFlow(msg.chat.id, symbol);
 });
 
-console.log('ST Flow Stocks bot is running...');
+console.log('ST Flow Stocks bot is running with Supabase subscriptions...');
