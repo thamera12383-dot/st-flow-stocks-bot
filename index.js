@@ -3,98 +3,145 @@ const TelegramBot = require('node-telegram-bot-api');
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 const API_KEY = process.env.MASSIVE_API_KEY;
 
-async function getStockPrice(symbol) {
-  const url = `https://api.massive.com/v2/aggs/ticker/${symbol}/prev?adjusted=true&apiKey=${API_KEY}`;
+function fmt(n) {
+  if (n === undefined || n === null || isNaN(n)) return 'غير متوفر';
+  return Number(n).toLocaleString('en-US');
+}
+
+function cleanSymbol(text) {
+  return text.replace('/flow', '').trim().toUpperCase();
+}
+
+function getContractType(item) {
+  return item?.details?.contract_type || '';
+}
+
+function getStrike(item) {
+  return item?.details?.strike_price;
+}
+
+function getVolume(item) {
+  return item?.day?.volume || 0;
+}
+
+function getOI(item) {
+  return item?.open_interest || 0;
+}
+
+function getExpiration(item) {
+  return item?.details?.expiration_date || 'غير متوفر';
+}
+
+function scoreContract(item) {
+  return getVolume(item) + getOI(item);
+}
+
+async function getOptionsChain(symbol) {
+  const url = `https://api.massive.com/v3/snapshot/options/${symbol}?limit=250&apiKey=${API_KEY}`;
   const res = await fetch(url);
   const data = await res.json();
 
-  if (!data.results || data.results.length === 0) {
-    return null;
+  if (!res.ok) {
+    throw new Error(data?.error || data?.message || 'API Error');
   }
 
-  const r = data.results[0];
-  return {
-    symbol,
-    close: r.c,
-    high: r.h,
-    low: r.l,
-    volume: r.v
-  };
+  return data.results || [];
 }
 
-async function sendStockUpdate(chatId, symbol) {
-  try {
-    const data = await getStockPrice(symbol);
+function topContracts(chain, type, count = 3) {
+  return chain
+    .filter(x => getContractType(x).toLowerCase() === type)
+    .sort((a, b) => scoreContract(b) - scoreContract(a))
+    .slice(0, count);
+}
 
-    if (!data) {
-      bot.sendMessage(chatId, `لم أجد بيانات لـ ${symbol}`);
+function formatContracts(title, list) {
+  if (!list.length) return `${title}\nلا توجد بيانات متاحة\n`;
+
+  return `${title}\n` + list.map((x, i) =>
+`${i + 1}) Strike [${getStrike(x)}]
+   الحجم: ${fmt(getVolume(x))}
+   العقود المفتوحة OI: ${fmt(getOI(x))}
+   الانتهاء: ${getExpiration(x)}`
+  ).join('\n\n') + '\n';
+}
+
+async function sendOptionsUpdate(chatId, symbol) {
+  try {
+    await bot.sendMessage(chatId, `⏳ جاري جلب بيانات عقود ${symbol}...`);
+
+    const chain = await getOptionsChain(symbol);
+
+    if (!chain.length) {
+      await bot.sendMessage(chatId, `لم أجد بيانات أوبشن لـ ${symbol}`);
       return;
     }
 
-    bot.sendMessage(chatId, `
-📊 تحديث ${data.symbol}
+    const calls = topContracts(chain, 'call', 3);
+    const puts = topContracts(chain, 'put', 3);
 
-السعر السابق: ${data.close}
-أعلى سعر: ${data.high}
-أقل سعر: ${data.low}
-الحجم: ${data.volume}
+    const totalCallVol = calls.reduce((s, x) => s + getVolume(x), 0);
+    const totalPutVol = puts.reduce((s, x) => s + getVolume(x), 0);
 
-⚠️ هذه بيانات الخطة المجانية وقد تكون نهاية يوم وليست لحظية.
-`);
-  } catch (error) {
-    bot.sendMessage(chatId, 'حدث خطأ أثناء جلب البيانات.');
-    console.error(error);
+    const bias =
+      totalCallVol > totalPutVol ? '🟢 الكول أقوى' :
+      totalPutVol > totalCallVol ? '🔴 البوت أقوى' :
+      '⚪ متوازن';
+
+    const msg =
+`📊 ملخص عقود ${symbol}
+
+${formatContracts('🟢 أعلى 3 كول', calls)}
+--------------------
+${formatContracts('🔴 أعلى 3 بوت', puts)}
+--------------------
+📍 قراءة سريعة:
+الغلبة حسب أعلى العقود: ${bias}
+
+⚠️ بيانات الخطة المجانية قد تكون محدودة أو غير لحظية بالكامل.`;
+
+    await bot.sendMessage(chatId, msg);
+  } catch (err) {
+    console.error(err);
+    await bot.sendMessage(chatId, `حدث خطأ أثناء جلب بيانات ${symbol}.\n${err.message}`);
   }
 }
 
 bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(msg.chat.id, `
-🚀 تم تشغيل بوت ST Flow Stocks
+  bot.sendMessage(msg.chat.id,
+`🚀 مرحبًا بك في ST Flow Stocks
 
-استخدم:
-/tsla
-/nvda
-/aapl
-/amd
-/help
-`);
+اكتب:
+/flow TSLA
+/flow NVDA
+/flow AAPL
+/flow AMD
+
+/help للمساعدة`);
 });
 
-bot.onText(/\/stocks/, (msg) => {
-  bot.sendMessage(msg.chat.id, `
-📊 قائمة الشركات:
+bot.onText(/\/flow (.+)/, (msg) => {
+  const symbol = cleanSymbol(msg.text);
 
-/tsla - تسلا
-/nvda - نفيديا
-/aapl - آبل
-/amd - AMD
-`);
-});
+  if (!symbol) {
+    bot.sendMessage(msg.chat.id, 'اكتب الرمز بهذا الشكل:\n/flow TSLA');
+    return;
+  }
 
-bot.onText(/\/tsla/, (msg) => sendStockUpdate(msg.chat.id, 'TSLA'));
-bot.onText(/\/nvda/, (msg) => sendStockUpdate(msg.chat.id, 'NVDA'));
-bot.onText(/\/aapl/, (msg) => sendStockUpdate(msg.chat.id, 'AAPL'));
-bot.onText(/\/amd/, (msg) => sendStockUpdate(msg.chat.id, 'AMD'));
-
-bot.onText(/\/stop/, (msg) => {
-  bot.sendMessage(msg.chat.id, '🛑 تم إيقاف التحديثات.');
-});
-
-bot.onText(/\/change/, (msg) => {
-  bot.sendMessage(msg.chat.id, '🔄 اختر شركة من القائمة: /stocks');
+  sendOptionsUpdate(msg.chat.id, symbol);
 });
 
 bot.onText(/\/help/, (msg) => {
-  bot.sendMessage(msg.chat.id, `
-❓ المساعدة
+  bot.sendMessage(msg.chat.id,
+`❓ طريقة الاستخدام:
 
-/tsla تحديث تسلا
-/nvda تحديث نفيديا
-/aapl تحديث آبل
-/amd تحديث AMD
-/stocks قائمة الشركات
-/stop إيقاف
-`);
+اكتب:
+/flow TSLA
+/flow NVDA
+/flow AAPL
+/flow AMD
+
+البوت يعرض أعلى 3 كول وأعلى 3 بوت حسب البيانات المتاحة.`);
 });
 
-console.log('Bot is running...');
+console.log('ST Flow Stocks bot is running...');
