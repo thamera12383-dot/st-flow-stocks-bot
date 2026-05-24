@@ -2,11 +2,12 @@
   "name": "st-flow-stocks-bot",
   "version": "1.0.0",
   "description": "Telegram stock flow bot",
-  "main": "index.js",
+  "main": "signals.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node signals.js"
   },
   "dependencies": {
+    "canvas": "^2.11.2",
     "node-telegram-bot-api": "^0.66.0"
   }
 }
