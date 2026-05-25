@@ -75,9 +75,7 @@ function generateCode() {
 }
 
 async function createActivationCode(days = 30) {
-
   const code = generateCode();
-
   const expiresAt = addDaysIso(days);
 
   const { error } = await supabase
@@ -98,7 +96,6 @@ async function createActivationCode(days = 30) {
 }
 
 async function getUserAccess(chatId) {
-
   const { data, error } = await supabase
     .from('users_access')
     .select('*')
@@ -113,7 +110,6 @@ async function getUserAccess(chatId) {
 }
 
 async function hasActiveAccess(chatId) {
-
   const user = await getUserAccess(chatId);
 
   if (!user) return false;
@@ -124,7 +120,6 @@ async function hasActiveAccess(chatId) {
 }
 
 async function requireAccess(chatId) {
-
   const access = await hasActiveAccess(chatId);
 
   if (access) return true;
@@ -145,7 +140,6 @@ async function requireAccess(chatId) {
 }
 
 async function redeemCode(chatId, code) {
-
   const cleanCode = String(code || '')
     .trim()
     .toUpperCase();
@@ -225,7 +219,6 @@ ${formatDate(expiresAt)}
 // =====================
 
 function fmt(n) {
-
   if (n === undefined || n === null || isNaN(Number(n))) {
     return 'غير متوفر';
   }
@@ -234,7 +227,6 @@ function fmt(n) {
 }
 
 function fmtPrice(n) {
-
   if (n === undefined || n === null || isNaN(Number(n))) {
     return 'غير متوفر';
   }
@@ -243,7 +235,6 @@ function fmtPrice(n) {
 }
 
 function fmtPercent(n) {
-
   if (n === undefined || n === null || isNaN(Number(n))) {
     return 'غير متوفر';
   }
@@ -256,13 +247,10 @@ function nowSeconds() {
 }
 
 function canRequest(chatId) {
-
   const last = userCooldown.get(chatId) || 0;
-
   const diff = nowSeconds() - last;
 
   if (diff < USER_COOLDOWN_SECONDS) {
-
     return {
       ok: false,
       wait: USER_COOLDOWN_SECONDS - diff
@@ -270,7 +258,6 @@ function canRequest(chatId) {
   }
 
   userCooldown.set(chatId, nowSeconds());
-
   return { ok: true };
 }
 
@@ -311,7 +298,6 @@ function getTheta(item) {
 }
 
 function gammaText(gamma) {
-
   const g = Number(gamma);
 
   if (gamma === undefined || gamma === null || isNaN(g)) {
@@ -325,111 +311,122 @@ function gammaText(gamma) {
   return 'منخفض';
 }
 
-function scoreContract(item) {
-  return getVolume(item) + getOI(item);
+function distancePercent(strike, stockPrice) {
+  const s = Number(strike);
+  const p = Number(stockPrice);
+
+  if (!s || !p || isNaN(s) || isNaN(p)) return null;
+
+  return Math.abs(((s - p) / p) * 100);
+}
+function daysToExpiration(dateStr) {
+  if (!dateStr) return 999;
+
+  const today = new Date();
+  const exp = new Date(dateStr);
+
+  const diff =
+    exp.getTime() - today.getTime();
+
+  return Math.ceil(
+    diff / (1000 * 60 * 60 * 24)
+  );
 }
 
-async function apiGet(url) {
+function qualityScore(item, stockPrice) {
+  let score = 0;
 
-  if (!API_KEY) {
-    throw new Error('Missing MASSIVE_API_KEY');
+  const volume = getVolume(item);
+  const oi = getOI(item);
+  const gamma = Number(getGamma(item) || 0);
+  const delta = Math.abs(Number(getDelta(item) || 0));
+  const strike = Number(getStrike(item));
+  const expiry = getExpiration(item);
+
+  const dist = distancePercent(
+    strike,
+    stockPrice
+  );
+
+  const dte =
+    daysToExpiration(expiry);
+
+  // قرب العقد من السعر
+  if (dist !== null) {
+    if (dist <= 0.5) score += 30;
+    else if (dist <= 1) score += 25;
+    else if (dist <= 2) score += 18;
+    else if (dist <= 3) score += 10;
   }
 
-  const res = await fetch(url);
+  // دخول جديد
+  if (volume > oi) score += 25;
+  else if (volume > oi * 0.7) score += 15;
+  else if (volume > oi * 0.4) score += 8;
 
-  const data = await res.json();
+  // حجم التداول
+  if (volume >= 50000) score += 20;
+  else if (volume >= 20000) score += 15;
+  else if (volume >= 10000) score += 10;
+  else if (volume >= 3000) score += 5;
 
-  if (!res.ok) {
-    throw new Error(data?.error || data?.message || 'API Error');
+  // OI
+  if (oi >= 10000) score += 10;
+  else if (oi >= 3000) score += 7;
+  else if (oi >= 1000) score += 4;
+
+  // Delta مناسبة
+  if (delta >= 0.25 && delta <= 0.45) {
+    score += 15;
+  } else if (delta > 0.45 && delta <= 0.65) {
+    score += 8;
   }
 
-  return data;
-}
+  // Gamma
+  if (gamma >= 0.08) score += 15;
+  else if (gamma >= 0.04) score += 10;
+  else if (gamma >= 0.02) score += 5;
 
-async function getStockSnapshot(symbol) {
+  // تاريخ قريب
+  if (dte >= 0 && dte <= 7) score += 10;
+  else if (dte <= 14) score += 5;
 
-  const url =
-    `https://api.massive.com/v2/aggs/ticker/${symbol}/prev?adjusted=true&apiKey=${API_KEY}`;
-
-  const data = await apiGet(url);
-
-  const r = data?.results?.[0];
-
-  if (!r) return null;
-
-  const change =
-    r.o ? ((r.c - r.o) / r.o) * 100 : null;
-
-  return {
-    price: r.c,
-    open: r.o,
-    high: r.h,
-    low: r.l,
-    volume: r.v,
-    change
-  };
-}
-async function getOptionsChain(symbol) {
-
-  const url =
-    `https://api.massive.com/v3/snapshot/options/${symbol}?limit=250&apiKey=${API_KEY}`;
-
-  const data = await apiGet(url);
-
-  return data.results || [];
+  return Math.min(score, 100);
 }
 
 function topContracts(chain, type, stockPrice, count = 3) {
-
   const maxDistancePercent = 3;
 
   return chain
     .filter(x => {
+      const contractType = getContractType(x);
 
-      const contractType =
-        getContractType(x);
+      if (contractType !== type) return false;
 
-      if (contractType !== type) {
-        return false;
-      }
+      const strike = Number(getStrike(x));
 
-      const strike =
-        Number(getStrike(x));
+      if (isNaN(strike)) return false;
 
-      if (isNaN(strike)) {
-        return false;
-      }
+      const dist = distancePercent(
+        strike,
+        stockPrice
+      );
 
-      const distancePercent =
-        Math.abs(
-          ((strike - stockPrice) / stockPrice) * 100
-        );
+      if (dist === null) return false;
 
-      return distancePercent <= maxDistancePercent;
+      return dist <= maxDistancePercent;
     })
-    .sort((a, b) => {
-
-      const volA = getVolume(a);
-      const volB = getVolume(b);
-
-      const oiA = getOI(a);
-      const oiB = getOI(b);
-
-      const scoreA =
-        volA + oiA + (volA > oiA ? volA * 2 : 0);
-
-      const scoreB =
-        volB + oiB + (volB > oiB ? volB * 2 : 0);
-
-      return scoreB - scoreA;
-    })
-    .slice(0, count);
+    .map(item => ({
+      item,
+      qScore: qualityScore(item, stockPrice)
+    }))
+    .sort((a, b) => b.qScore - a.qScore)
+    .slice(0, count)
+    .map(x => x.item);
 }
 
 function nearestSupportResistance(stock) {
-
   if (!stock) {
-
     return {
       support: 'غير متوفر',
       resistance: 'غير متوفر'
@@ -443,44 +440,35 @@ function nearestSupportResistance(stock) {
 }
 
 function momentumText(stock) {
-
-  if (
-    !stock ||
-    stock.change === null ||
-    stock.change === undefined
-  ) {
+  if (!stock || stock.change === null || stock.change === undefined) {
     return 'غير متوفر';
   }
 
-  if (stock.change > 1) {
-    return '🔥 صاعد قوي';
-  }
-
-  if (stock.change > 0) {
-    return '🟢 صاعد';
-  }
-
-  if (stock.change < -1) {
-    return '🔴 هابط قوي';
-  }
-
-  if (stock.change < 0) {
-    return '🔴 هابط';
-  }
+  if (stock.change > 1) return '🔥 صاعد قوي';
+  if (stock.change > 0) return '🟢 صاعد';
+  if (stock.change < -1) return '🔴 هابط قوي';
+  if (stock.change < 0) return '🔴 هابط';
 
   return '⚪ محايد';
 }
 
-function formatContracts(title, list) {
-
+function formatContracts(title, list, stockPrice) {
   if (!list.length) {
     return `${title}\nلا توجد بيانات متاحة\n`;
   }
 
   return `${title}\n\n` +
+    list.map((x, i) => {
+      const strike = getStrike(x);
+      const dist = distancePercent(
+        strike,
+        stockPrice
+      );
 
-list.map((x, i) =>
-`${i + 1}) Strike [${getStrike(x)}]
+      const qScore =
+        qualityScore(x, stockPrice);
+
+      return `${i + 1}) Strike [${strike}]
 
 📦 الحجم:
 ${fmt(getVolume(x))}
@@ -489,56 +477,51 @@ ${fmt(getVolume(x))}
 ${fmt(getOI(x))}
 
 📅 الانتهاء:
-${getExpiration(x)}`
-).join('\n\n') + '\n';
+${getExpiration(x)}
+
+📍 بعده عن السعر:
+${dist !== null ? dist.toFixed(2) + '%' : 'غير متوفر'}
+
+⭐ جودة العقد:
+${qScore}/100`;
+    }).join('\n\n') + '\n';
 }
 
-function getStrongestContract(calls, puts) {
-
+function getStrongestContract(calls, puts, stockPrice) {
   const all = [
     ...calls.map(x => ({
       item: x,
-      side: 'CALL'
+      side: 'CALL',
+      qScore: qualityScore(x, stockPrice)
     })),
-
     ...puts.map(x => ({
       item: x,
-      side: 'PUT'
+      side: 'PUT',
+      qScore: qualityScore(x, stockPrice)
     }))
   ];
 
-  if (!all.length) {
-    return null;
-  }
+  if (!all.length) return null;
 
-  all.sort(
-    (a, b) =>
-      scoreContract(b.item) -
-      scoreContract(a.item)
-  );
+  all.sort((a, b) => b.qScore - a.qScore);
 
   return all[0];
 }
 
-function strongestFocus(calls, puts) {
-
+function strongestFocus(calls, puts, stockPrice) {
   const strongest =
-    getStrongestContract(calls, puts);
+    getStrongestContract(calls, puts, stockPrice);
 
-  if (!strongest) {
-    return 'غير متوفر';
-  }
+  if (!strongest) return 'غير متوفر';
 
-  return `${strongest.side} ${getStrike(strongest.item)}`;
+  return `${strongest.side} ${getStrike(strongest.item)} | جودة ${strongest.qScore}/100`;
 }
 
-function strongestContractDetails(calls, puts) {
-
+function strongestContractDetails(calls, puts, stockPrice) {
   const strongest =
-    getStrongestContract(calls, puts);
+    getStrongestContract(calls, puts, stockPrice);
 
   if (!strongest) {
-
     return `📊 بيانات العقد الأقوى:
 غير متوفر`;
   }
@@ -549,13 +532,23 @@ function strongestContractDetails(calls, puts) {
   const gamma = getGamma(item);
   const iv = getIV(item);
   const theta = getTheta(item);
+  const strike = getStrike(item);
+  const dist = distancePercent(
+    strike,
+    stockPrice
+  );
 
   return `📊 بيانات العقد الأقوى:
 
+⭐ جودة العقد:
+${strongest.qScore}/100
+
+📍 قربه من السعر:
+${dist !== null ? dist.toFixed(2) + '%' : 'غير متوفر'}
+
 Δ Delta:
 ${
-  delta !== undefined &&
-  delta !== null
+  delta !== undefined && delta !== null
     ? Number(delta).toFixed(2)
     : 'غير متوفر'
 }
@@ -565,48 +558,28 @@ ${gammaText(gamma)}
 
 IV:
 ${
-  iv !== undefined &&
-  iv !== null
+  iv !== undefined && iv !== null
     ? fmtPercent(Number(iv) * 100)
     : 'غير متوفر'
 }
 
 Θ Theta:
 ${
-  theta !== undefined &&
-  theta !== null
+  theta !== undefined && theta !== null
     ? Number(theta).toFixed(2)
     : 'غير متوفر'
 }`;
 }
-
-function biasText(calls, puts) {
+function biasText(calls, puts, stockPrice) {
 
   const calcSide = (list) => {
 
     return list.reduce((sum, item) => {
 
-      const volume =
-        getVolume(item);
-
-      const oi =
-        getOI(item);
-
-      let score =
-        volume + oi;
-
-      if (volume > oi) {
-        score += volume * 2;
-      }
-
-      const gamma =
-        Number(getGamma(item) || 0);
-
-      if (gamma >= 0.04) {
-        score += 5000;
-      }
-
-      return sum + score;
+      return (
+        sum +
+        qualityScore(item, stockPrice)
+      );
 
     }, 0);
   };
@@ -617,11 +590,11 @@ function biasText(calls, puts) {
   const totalPut =
     calcSide(puts);
 
-  if (totalCall > totalPut * 1.2) {
+  if (totalCall > totalPut * 1.25) {
     return '🟢 تدفق شرائي قوي';
   }
 
-  if (totalPut > totalCall * 1.2) {
+  if (totalPut > totalCall * 1.25) {
     return '🔴 تدفق بيعي قوي';
   }
 
@@ -646,19 +619,25 @@ async function buildFlowMessage(symbol) {
   const chain =
     await getOptionsChain(symbol);
 
-  const calls = topContracts(
-    chain,
-    'call',
-    stock.price,
-    3
-  );
+  if (!stock) {
+    return `⚠️ تعذر جلب بيانات ${symbol}`;
+  }
 
-  const puts = topContracts(
-    chain,
-    'put',
-    stock.price,
-    3
-  );
+  const calls =
+    topContracts(
+      chain,
+      'call',
+      stock.price,
+      3
+    );
+
+  const puts =
+    topContracts(
+      chain,
+      'put',
+      stock.price,
+      3
+    );
 
   const sr =
     nearestSupportResistance(stock);
@@ -667,27 +646,105 @@ async function buildFlowMessage(symbol) {
     momentumText(stock);
 
   const focus =
-    strongestFocus(calls, puts);
+    strongestFocus(
+      calls,
+      puts,
+      stock.price
+    );
 
   const details =
     strongestContractDetails(
       calls,
-      puts
+      puts,
+      stock.price
     );
 
   const bias =
-    biasText(calls, puts);
+    biasText(
+      calls,
+      puts,
+      stock.price
+    );
 
-  const price = stock
-    ? fmtPrice(stock.price)
-    : 'غير متوفر';
+  const price =
+    fmtPrice(stock.price);
 
   const change =
-    stock &&
     stock.change !== null &&
     stock.change !== undefined
       ? fmtPercent(stock.change)
       : 'غير متوفر';
+
+  let smartRead = '';
+
+  const strongest =
+    getStrongestContract(
+      calls,
+      puts,
+      stock.price
+    );
+
+  if (strongest) {
+
+    const item =
+      strongest.item;
+
+    const volume =
+      getVolume(item);
+
+    const oi =
+      getOI(item);
+
+    const gamma =
+      Number(getGamma(item) || 0);
+
+    const delta =
+      Math.abs(
+        Number(
+          getDelta(item) || 0
+        )
+      );
+
+    if (
+      volume > oi &&
+      gamma >= 0.04
+    ) {
+
+      smartRead =
+`🚨 قراءة ذكية:
+دخول سيولة جديدة قوية مع جاما مرتفعة واحتمال حركة سريعة.`;
+
+    } else if (
+      volume > oi
+    ) {
+
+      smartRead =
+`📈 قراءة ذكية:
+يوجد نشاط جديد ملحوظ على العقود الحالية.`;
+
+    } else {
+
+      smartRead =
+`📊 قراءة ذكية:
+التمركز الحالي يبدو أقرب إلى احتفاظ أو حماية وليس دخول هجومي قوي.`;
+    }
+
+    if (
+      delta >= 0.25 &&
+      delta <= 0.45
+    ) {
+
+      smartRead += `
+
+🎯 العقد قريب من منطقة الحركة السريعة.`;
+    }
+
+  } else {
+
+    smartRead =
+`📊 قراءة ذكية:
+لا توجد عقود قريبة كافية لتكوين قراءة واضحة حالياً.`;
+  }
 
   const message =
 `📊 تدفق عقود ${symbol}
@@ -713,14 +770,16 @@ ${fmtPrice(sr.support)}
 
 ${formatContracts(
   '🟢 أعلى عقود CALL',
-  calls
+  calls,
+  stock.price
 )}
 
 ━━━━━━━━━━━━━━
 
 ${formatContracts(
   '🔴 أعلى عقود PUT',
-  puts
+  puts,
+  stock.price
 )}
 
 ━━━━━━━━━━━━━━
@@ -729,6 +788,12 @@ ${formatContracts(
 ${focus}
 
 ${details}
+
+━━━━━━━━━━━━━━
+
+${smartRead}
+
+━━━━━━━━━━━━━━
 
 📍 الغلبة الحالية:
 ${bias}
@@ -743,6 +808,7 @@ ${bias}
 
   return message;
 }
+
 async function checkExpiringSubscriptions() {
 
   try {
