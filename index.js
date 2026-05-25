@@ -660,3 +660,173 @@ ${formatDate(user.expires_at)}
     );
   }
 }
+function clearUpdate(chatId) {
+  const active = activeUpdates.get(chatId);
+
+  if (active?.intervalId) clearInterval(active.intervalId);
+  if (active?.timeoutId) clearTimeout(active.timeoutId);
+
+  activeUpdates.delete(chatId);
+}
+
+function startAutoUpdate(chatId, symbol) {
+  clearUpdate(chatId);
+
+  const intervalId = setInterval(async () => {
+    try {
+      const msg = await buildFlowMessage(symbol);
+      await bot.sendMessage(chatId, msg);
+    } catch (err) {
+      clearUpdate(chatId);
+    }
+  }, UPDATE_INTERVAL_MS);
+
+  const timeoutId = setTimeout(async () => {
+    clearUpdate(chatId);
+    await bot.sendMessage(chatId, `✅ انتهت متابعة ${symbol} لمدة 5 دقائق.`);
+  }, UPDATE_DURATION_MS);
+
+  activeUpdates.set(chatId, { symbol, intervalId, timeoutId });
+}
+
+async function sendFlow(chatId, symbol) {
+  try {
+    const access = await requireAccess(chatId);
+    if (!access) return;
+
+    const check = canRequest(chatId);
+    if (!check.ok) {
+      await bot.sendMessage(chatId, `⏳ انتظر ${check.wait} ثواني قبل طلب جديد.`);
+      return;
+    }
+
+    await bot.sendMessage(chatId, `⏳ جاري جلب بيانات ${symbol}...`);
+
+    const msg = await buildFlowMessage(symbol);
+    await bot.sendMessage(chatId, msg);
+
+    startAutoUpdate(chatId, symbol);
+
+  } catch (err) {
+    const message = String(err.message || '');
+
+    const entitlement =
+      message.toLowerCase().includes('not entitled') ||
+      message.toLowerCase().includes('entitled');
+
+    if (entitlement) {
+      await bot.sendMessage(
+        chatId,
+`⚠️ لا توجد بيانات متاحة حالياً.
+
+لم يتم تفعيل اشتراك البيانات المباشرة للمالك بعد.`
+      );
+      return;
+    }
+
+    await bot.sendMessage(chatId, `حدث خطأ:\n${message}`);
+  }
+}
+
+bot.onText(/\/start/, async (msg) => {
+  await bot.sendMessage(
+    msg.chat.id,
+`🚀 مرحبًا بك في ST Flow Stocks
+
+🔒 البوت للمشتركين فقط.
+
+لتفعيل اشتراكك:
+
+/redeem CODE
+
+مثال:
+/redeem ST-ABCD-1234`
+  );
+});
+
+bot.onText(/\/myid/, async (msg) => {
+  await bot.sendMessage(msg.chat.id, `🆔 Telegram ID:\n${msg.chat.id}`);
+});
+
+bot.onText(/\/redeem (.+)/, async (msg, match) => {
+  const result = await redeemCode(msg.chat.id, match[1]);
+  await bot.sendMessage(msg.chat.id, result.message);
+});
+
+bot.onText(/\/status/, async (msg) => {
+  const sub = await getUserAccess(msg.chat.id);
+
+  if (!sub) {
+    await bot.sendMessage(msg.chat.id, `🔒 لا يوجد اشتراك فعال.\n\nللتفعيل:\n/redeem CODE`);
+    return;
+  }
+
+  const active = await hasActiveAccess(msg.chat.id);
+
+  await bot.sendMessage(
+    msg.chat.id,
+`${active ? '✅ اشتراكك فعال' : '❌ اشتراكك منتهي'}
+
+الكود المستخدم:
+${sub.code_used || 'غير متوفر'}
+
+ينتهي في:
+${formatDate(sub.expires_at)}`
+  );
+});
+
+bot.onText(/\/gencode(?:\s+(\d+))?/, async (msg, match) => {
+  if (!isAdmin(msg.chat.id)) {
+    await bot.sendMessage(msg.chat.id, '⛔ هذا الأمر للأدمن فقط.');
+    return;
+  }
+
+  const days = Number(match[1] || 30);
+  const result = await createActivationCode(days);
+
+  await bot.sendMessage(
+    msg.chat.id,
+`✅ تم إنشاء كود جديد
+
+الكود:
+${result.code}
+
+المدة:
+${days} يوم
+
+ينتهي في:
+${formatDate(result.expiresAt)}
+
+طريقة التفعيل:
+
+/redeem ${result.code}`
+  );
+});
+
+bot.onText(/\/stop/, async (msg) => {
+  clearUpdate(msg.chat.id);
+  await bot.sendMessage(msg.chat.id, '🛑 تم إيقاف التحديثات.');
+});
+
+bot.on('message', async (msg) => {
+  const text = msg.text;
+  if (!text) return;
+  if (text.startsWith('/')) return;
+
+  const symbol = text.trim().toUpperCase();
+
+  if (!/^[A-Z]{1,5}$/.test(symbol)) {
+    await bot.sendMessage(msg.chat.id, '⚠️ الرمز غير صحيح.');
+    return;
+  }
+
+  sendFlow(msg.chat.id, symbol);
+});
+
+checkExpiringSubscriptions();
+
+setInterval(() => {
+  checkExpiringSubscriptions();
+}, CHECK_EXPIRY_INTERVAL);
+
+console.log('ST Flow Stocks bot running...');
