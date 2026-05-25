@@ -22,7 +22,6 @@ const USER_COOLDOWN_SECONDS = 10;
 const CACHE_SECONDS = 60;
 const UPDATE_INTERVAL_MS = 60 * 1000;
 const UPDATE_DURATION_MS = 5 * 60 * 1000;
-
 const EXPIRY_WARNING_DAYS = 3;
 const CHECK_EXPIRY_INTERVAL = 12 * 60 * 60 * 1000;
 
@@ -221,7 +220,7 @@ function canRequest(chatId) {
 }
 
 function getContractType(item) {
-  return String(item?.details?.contract_type || '').toLowerCase();
+  return String(item?.details?.contract_type || '').toUpperCase();
 }
 
 function getStrike(item) {
@@ -255,11 +254,11 @@ function getGamma(item) {
 function getTheta(item) {
   return item?.greeks?.theta;
 }
+
 function gammaText(gamma) {
   const g = Number(gamma);
 
   if (gamma === undefined || gamma === null || isNaN(g)) return 'غير متوفر';
-
   if (g >= 0.08) return 'مرتفع جدًا';
   if (g >= 0.04) return 'مرتفع';
   if (g >= 0.02) return 'متوسط';
@@ -284,7 +283,6 @@ function daysToExpiration(dateStr) {
 
   return Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
 }
-
 function qualityScore(item, stockPrice) {
   const volume = getVolume(item);
   const oi = getOI(item);
@@ -306,7 +304,7 @@ function qualityScore(item, stockPrice) {
   if (dte <= 7) score += 1500;
   if (iv >= 0.40) score -= 1000;
 
-  return score;
+  return Math.round(score);
 }
 
 async function apiGet(url) {
@@ -352,19 +350,16 @@ async function getOptionsChain(symbol) {
 }
 
 function topContracts(chain, type, stockPrice, count = 3) {
-  const maxDistancePercent = 3;
-
   return chain
     .filter(x => {
       if (getContractType(x) !== type) return false;
 
       const strike = Number(getStrike(x));
-      if (isNaN(strike)) return false;
-
       const dist = distancePercent(strike, stockPrice);
-      if (dist === null) return false;
 
-      return dist <= maxDistancePercent;
+      if (isNaN(strike) || dist === null) return false;
+
+      return dist <= 3;
     })
     .map(item => ({
       item,
@@ -374,6 +369,20 @@ function topContracts(chain, type, stockPrice, count = 3) {
     .slice(0, count)
     .map(x => x.item);
 }
+
+function topGammaContracts(chain, stockPrice, count = 3) {
+  return chain
+    .filter(x => {
+      const gamma = Number(getGamma(x) || 0);
+      const strike = Number(getStrike(x));
+      const dist = distancePercent(strike, stockPrice);
+
+      return gamma > 0 && dist !== null && dist <= 3;
+    })
+    .sort((a, b) => Number(getGamma(b) || 0) - Number(getGamma(a) || 0))
+    .slice(0, count);
+}
+
 function nearestSupportResistance(stock) {
   if (!stock) {
     return { support: 'غير متوفر', resistance: 'غير متوفر' };
@@ -395,98 +404,16 @@ function momentumText(stock) {
   return '⚪ محايد';
 }
 
-function formatContracts(title, list, stockPrice) {
-  if (!list.length) return `${title}\nلا توجد بيانات متاحة\n`;
-
-  return `${title}\n\n` +
-    list.map((x, i) => {
-      const strike = getStrike(x);
-      const dist = distancePercent(strike, stockPrice);
-      const qScore = Math.round(qualityScore(x, stockPrice));
-
-      return `${i + 1}) Strike [${strike}]
-
-📦 الحجم:
-${fmt(getVolume(x))}
-
-📂 OI:
-${fmt(getOI(x))}
-
-📅 الانتهاء:
-${getExpiration(x)}
-
-📍 بعده عن السعر:
-${dist !== null ? dist.toFixed(2) + '%' : 'غير متوفر'}
-
-⭐ جودة العقد:
-${qScore}`;
-    }).join('\n\n') + '\n';
-}
-
 function getStrongestContract(calls, puts, stockPrice) {
   const all = [
-    ...calls.map(x => ({
-      item: x,
-      side: 'CALL',
-      qScore: qualityScore(x, stockPrice)
-    })),
-    ...puts.map(x => ({
-      item: x,
-      side: 'PUT',
-      qScore: qualityScore(x, stockPrice)
-    }))
+    ...calls.map(x => ({ item: x, side: 'CALL', qScore: qualityScore(x, stockPrice) })),
+    ...puts.map(x => ({ item: x, side: 'PUT', qScore: qualityScore(x, stockPrice) }))
   ];
 
   if (!all.length) return null;
 
   all.sort((a, b) => b.qScore - a.qScore);
   return all[0];
-}
-
-function strongestFocus(calls, puts, stockPrice) {
-  const strongest = getStrongestContract(calls, puts, stockPrice);
-
-  if (!strongest) return 'غير متوفر';
-
-  return `${strongest.side} ${getStrike(strongest.item)} | جودة ${Math.round(strongest.qScore)}`;
-}
-
-function strongestContractDetails(calls, puts, stockPrice) {
-  const strongest = getStrongestContract(calls, puts, stockPrice);
-
-  if (!strongest) {
-    return `📊 بيانات العقد الأقوى:
-غير متوفر`;
-  }
-
-  const item = strongest.item;
-
-  const delta = getDelta(item);
-  const gamma = getGamma(item);
-  const iv = getIV(item);
-  const theta = getTheta(item);
-  const strike = getStrike(item);
-  const dist = distancePercent(strike, stockPrice);
-
-  return `📊 بيانات العقد الأقوى:
-
-⭐ جودة العقد:
-${Math.round(strongest.qScore)}
-
-📍 قربه من السعر:
-${dist !== null ? dist.toFixed(2) + '%' : 'غير متوفر'}
-
-Δ Delta:
-${delta !== undefined && delta !== null ? Number(delta).toFixed(2) : 'غير متوفر'}
-
-Γ Gamma:
-${gammaText(gamma)}
-
-IV:
-${iv !== undefined && iv !== null ? fmtPercent(Number(iv) * 100) : 'غير متوفر'}
-
-Θ Theta:
-${theta !== undefined && theta !== null ? Number(theta).toFixed(2) : 'غير متوفر'}`;
 }
 
 function biasText(calls, puts, stockPrice) {
@@ -501,7 +428,6 @@ function biasText(calls, puts, stockPrice) {
 
   return '⚪ تدفق متوازن';
 }
-
 async function buildFlowMessage(symbol) {
   const cached = CACHE.get(symbol);
 
@@ -514,101 +440,98 @@ async function buildFlowMessage(symbol) {
 
   const chain = await getOptionsChain(symbol);
 
-  const calls = topContracts(chain, 'call', stock.price, 3);
-  const puts = topContracts(chain, 'put', stock.price, 3);
+  const calls = topContracts(chain, 'CALL', stock.price, 3);
+  const puts = topContracts(chain, 'PUT', stock.price, 3);
+  const gammaLeaders = topGammaContracts(chain, stock.price, 3);
 
   const sr = nearestSupportResistance(stock);
   const momentum = momentumText(stock);
-
-  const focus = strongestFocus(calls, puts, stock.price);
-  const details = strongestContractDetails(calls, puts, stock.price);
   const bias = biasText(calls, puts, stock.price);
-
-  const price = fmtPrice(stock.price);
-  const change =
-    stock.change !== null && stock.change !== undefined
-      ? fmtPercent(stock.change)
-      : 'غير متوفر';
-
   const strongest = getStrongestContract(calls, puts, stock.price);
 
-  let smartRead = `📊 قراءة ذكية:
-لا توجد عقود قريبة كافية لتكوين قراءة واضحة حالياً.`;
+  if (!strongest) {
+    const msg =
+`⚠️ لا توجد عقود قريبة كافية على ${symbol}
 
-  if (strongest) {
-    const item = strongest.item;
-    const volume = getVolume(item);
-    const oi = getOI(item);
-    const gamma = Number(getGamma(item) || 0);
-    const delta = Math.abs(Number(getDelta(item) || 0));
+💰 السعر الحالي: ${fmtPrice(stock.price)}
 
-    if (volume > oi && gamma >= 0.04) {
-      smartRead =
-`🚨 قراءة ذكية:
-دخول سيولة جديدة قوية مع جاما مرتفعة واحتمال حركة سريعة.`;
-    } else if (volume > oi) {
-      smartRead =
-`📈 قراءة ذكية:
-يوجد نشاط جديد ملحوظ على العقود الحالية.`;
-    } else {
-      smartRead =
-`📊 قراءة ذكية:
-التمركز الحالي يبدو أقرب إلى احتفاظ أو حماية وليس دخول هجومي قوي.`;
-    }
+يرجى المحاولة لاحقاً.`;
 
-    if (delta >= 0.25 && delta <= 0.45) {
-      smartRead += `
+    CACHE.set(symbol, { time: nowSeconds(), message: msg });
+    return msg;
+  }
 
-🎯 العقد قريب من منطقة الحركة السريعة.`;
-    }
+  const item = strongest.item;
+  const side = strongest.side;
+  const strike = getStrike(item);
+  const expiry = getExpiration(item);
+  const volume = getVolume(item);
+  const oi = getOI(item);
+  const delta = getDelta(item);
+  const gamma = getGamma(item);
+  const iv = getIV(item);
+  const theta = getTheta(item);
+  const qScore = strongest.qScore;
+  const dist = distancePercent(strike, stock.price);
+
+  let qualityLabel = 'متوسطة';
+  if (qScore >= 60000) qualityLabel = 'قوية جدًا';
+  else if (qScore >= 35000) qualityLabel = 'قوية';
+  else if (qScore >= 20000) qualityLabel = 'جيدة';
+
+  const gammaSection =
+    gammaLeaders.length
+      ? gammaLeaders.map((x, i) => {
+          const g = Number(getGamma(x) || 0);
+          return `${i + 1}) ${getContractType(x)} ${getStrike(x)} — Γ ${g.toFixed(2)}`;
+        }).join('\n')
+      : 'لا توجد بيانات Gamma قريبة';
+
+  let smartRead = '';
+
+  if (volume > oi && Number(gamma || 0) >= 0.04) {
+    smartRead = 'دخول سيولة جديدة مع Gamma مرتفعة. احتمال حركة سريعة إذا استمر الزخم.';
+  } else if (volume > oi) {
+    smartRead = 'دخول سيولة جديدة على العقد الأقوى. راقب ثبات السعر قرب المستوى الحالي.';
+  } else {
+    smartRead = 'التمركز موجود، لكنه لا يؤكد دخول هجومي قوي حتى الآن.';
   }
 
   const message =
-`📊 تدفق عقود ${symbol}
+`🚨 ${symbol} — ${bias}
 
-💰 السعر الحالي:
-${price}
+📈 الاتجاه: ${momentum}
+💰 السعر: ${fmtPrice(stock.price)}
+📊 التغير: ${
+  stock.change !== null && stock.change !== undefined
+    ? fmtPercent(stock.change)
+    : 'غير متوفر'
+}
 
-📈 التغير:
-${change}
+🎯 العقد الأقوى: ${side} ${strike}
+📅 الانتهاء: ${expiry}
 
-🔥 الزخم:
-${momentum}
+⭐ الجودة: ${qualityLabel}
+📍 قرب العقد: ${dist !== null ? dist.toFixed(2) + '%' : 'غير متوفر'}
+📦 الحجم: ${fmt(volume)}
+📂 OI: ${fmt(oi)}
 
-━━━━━━━━━━━━━━
+Δ Delta: ${delta !== undefined && delta !== null ? Number(delta).toFixed(2) : 'غير متوفر'}
+Γ Gamma: ${gammaText(gamma)}
+IV: ${iv !== undefined && iv !== null ? fmtPercent(Number(iv) * 100) : 'غير متوفر'}
+Θ Theta: ${theta !== undefined && theta !== null ? Number(theta).toFixed(2) : 'غير متوفر'}
 
-📍 المقاومة الأقرب:
-${fmtPrice(sr.resistance)}
+⚡ أعلى Gamma:
+${gammaSection}
 
-📍 الدعم الأقرب:
-${fmtPrice(sr.support)}
-
-━━━━━━━━━━━━━━
-
-${formatContracts('🟢 أعلى عقود CALL', calls, stock.price)}
-
-━━━━━━━━━━━━━━
-
-${formatContracts('🔴 أعلى عقود PUT', puts, stock.price)}
-
-━━━━━━━━━━━━━━
-
-🔥 أقوى تمركز:
-${focus}
-
-${details}
-
-━━━━━━━━━━━━━━
-
+🧠 القراءة:
 ${smartRead}
 
-━━━━━━━━━━━━━━
+⚠️ مراقبة:
+الدعم: ${fmtPrice(sr.support)}
+المقاومة: ${fmtPrice(sr.resistance)}
 
-📍 الغلبة الحالية:
-${bias}
-
-⏱ التحديث:
-كل 60 ثانية لمدة 5 دقائق`;
+⏱ التحديث: كل 60 ثانية لمدة 5 دقائق`;
 
   CACHE.set(symbol, { time: nowSeconds(), message });
   return message;
@@ -636,9 +559,8 @@ async function checkExpiringSubscriptions() {
       const isWithinWarning = expiry <= warningDate && expiry > now;
 
       if (isWithinWarning && !alreadyNotified) {
-        try {
-          await bot.sendMessage(
-            user.telegram_id,
+        await bot.sendMessage(
+          user.telegram_id,
 `⚠️ تنبيه اشتراك
 
 اشتراكك سينتهي خلال 3 أيام.
@@ -647,15 +569,12 @@ async function checkExpiringSubscriptions() {
 ${formatDate(user.expires_at)}
 
 للتجديد تواصل مع الإدارة.`
-          );
+        );
 
-          await supabase
-            .from('users_access')
-            .update({ notified_3_days: true })
-            .eq('telegram_id', user.telegram_id);
-        } catch (err) {
-          console.error('Notification Error:', err.message);
-        }
+        await supabase
+          .from('users_access')
+          .update({ notified_3_days: true })
+          .eq('telegram_id', user.telegram_id);
       }
     }
   } catch (err) {
@@ -715,33 +634,7 @@ async function sendFlow(chatId, symbol) {
   } catch (err) {
     console.error(err);
 
-    const message = String(err.message || '');
-
-    const entitlement =
-      message.toLowerCase().includes('not entitled') ||
-      message.toLowerCase().includes('entitled');
-
-    if (entitlement) {
-      await bot.sendMessage(
-        chatId,
-`⚠️ لا توجد بيانات متاحة حالياً.
-
-لم يتم تفعيل اشتراك البيانات المباشرة للمالك بعد.`
-      );
-      return;
-    }
-
-    if (message.includes('Missing MASSIVE_API_KEY')) {
-      await bot.sendMessage(
-        chatId,
-`⚠️ مفتاح MASSIVE_API_KEY غير موجود.
-
-أضفه داخل Railway Variables.`
-      );
-      return;
-    }
-
-    await bot.sendMessage(chatId, `حدث خطأ:\n${message}`);
+    await bot.sendMessage(chatId, `حدث خطأ:\n${err.message}`);
   }
 }
 
@@ -770,24 +663,22 @@ bot.onText(/\/redeem (.+)/, async (msg, match) => {
     const result = await redeemCode(msg.chat.id, match[1]);
     await bot.sendMessage(msg.chat.id, result.message);
   } catch (err) {
-    console.error(err);
     await bot.sendMessage(msg.chat.id, `حدث خطأ أثناء التفعيل:\n${err.message}`);
   }
 });
 
 bot.onText(/\/status/, async (msg) => {
-  try {
-    const sub = await getUserAccess(msg.chat.id);
+  const sub = await getUserAccess(msg.chat.id);
 
-    if (!sub) {
-      await bot.sendMessage(msg.chat.id, `🔒 لا يوجد اشتراك فعال.\n\nللتفعيل:\n/redeem CODE`);
-      return;
-    }
+  if (!sub) {
+    await bot.sendMessage(msg.chat.id, `🔒 لا يوجد اشتراك فعال.\n\nللتفعيل:\n/redeem CODE`);
+    return;
+  }
 
-    const active = await hasActiveAccess(msg.chat.id);
+  const active = await hasActiveAccess(msg.chat.id);
 
-    await bot.sendMessage(
-      msg.chat.id,
+  await bot.sendMessage(
+    msg.chat.id,
 `${active ? '✅ اشتراكك فعال' : '❌ اشتراكك منتهي'}
 
 الكود المستخدم:
@@ -795,25 +686,20 @@ ${sub.code_used || 'غير متوفر'}
 
 ينتهي في:
 ${formatDate(sub.expires_at)}`
-    );
-  } catch (err) {
-    console.error(err);
-    await bot.sendMessage(msg.chat.id, `حدث خطأ:\n${err.message}`);
-  }
+  );
 });
 
 bot.onText(/\/gencode(?:\s+(\d+))?/, async (msg, match) => {
-  try {
-    if (!isAdmin(msg.chat.id)) {
-      await bot.sendMessage(msg.chat.id, '⛔ هذا الأمر للأدمن فقط.');
-      return;
-    }
+  if (!isAdmin(msg.chat.id)) {
+    await bot.sendMessage(msg.chat.id, '⛔ هذا الأمر للأدمن فقط.');
+    return;
+  }
 
-    const days = Number(match[1] || 30);
-    const result = await createActivationCode(days);
+  const days = Number(match[1] || 30);
+  const result = await createActivationCode(days);
 
-    await bot.sendMessage(
-      msg.chat.id,
+  await bot.sendMessage(
+    msg.chat.id,
 `✅ تم إنشاء كود جديد
 
 الكود:
@@ -828,11 +714,7 @@ ${formatDate(result.expiresAt)}
 طريقة التفعيل:
 
 /redeem ${result.code}`
-    );
-  } catch (err) {
-    console.error(err);
-    await bot.sendMessage(msg.chat.id, `حدث خطأ:\n${err.message}`);
-  }
+  );
 });
 
 bot.onText(/\/help/, async (msg) => {
@@ -862,21 +744,9 @@ bot.on('message', async (msg) => {
   if (text.startsWith('/')) return;
 
   const symbol = text.trim().toUpperCase();
-  const valid = /^[A-Z]{1,5}$/.test(symbol);
 
-  if (!valid) {
-    await bot.sendMessage(
-      msg.chat.id,
-`⚠️ الرمز غير صحيح.
-
-أمثلة صحيحة:
-
-TSLA
-AAPL
-NVDA
-AMD
-SPY`
-    );
+  if (!/^[A-Z]{1,5}$/.test(symbol)) {
+    await bot.sendMessage(msg.chat.id, '⚠️ الرمز غير صحيح.');
     return;
   }
 
