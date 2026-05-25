@@ -1,10 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { createClient } = require('@supabase/supabase-js');
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, {
-  polling: true
-});
-
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 const API_KEY = process.env.MASSIVE_API_KEY;
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -15,10 +12,7 @@ const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
   .map(x => x.trim())
   .filter(Boolean);
 
-const supabase = createClient(
-  SUPABASE_URL,
-  SUPABASE_SERVICE_KEY
-);
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 const userCooldown = new Map();
 const CACHE = new Map();
@@ -30,8 +24,7 @@ const UPDATE_INTERVAL_MS = 60 * 1000;
 const UPDATE_DURATION_MS = 5 * 60 * 1000;
 
 const EXPIRY_WARNING_DAYS = 3;
-const CHECK_EXPIRY_INTERVAL =
-  12 * 60 * 60 * 1000;
+const CHECK_EXPIRY_INTERVAL = 12 * 60 * 60 * 1000;
 
 // =====================
 // Subscription System
@@ -43,17 +36,12 @@ function nowIso() {
 
 function addDaysIso(days) {
   const d = new Date();
-
   d.setDate(d.getDate() + Number(days));
-
   return d.toISOString();
 }
 
 function formatDate(v) {
-
-  if (!v) {
-    return 'غير متوفر';
-  }
+  if (!v) return 'غير متوفر';
 
   return new Date(v).toLocaleString('ar-SA', {
     year: 'numeric',
@@ -69,33 +57,25 @@ function isAdmin(chatId) {
 }
 
 function generateCode() {
-
-  const chars =
-    'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
   let code = 'ST-';
 
   for (let i = 0; i < 4; i++) {
-    code += chars[
-      Math.floor(Math.random() * chars.length)
-    ];
+    code += chars[Math.floor(Math.random() * chars.length)];
   }
 
   code += '-';
 
   for (let i = 0; i < 4; i++) {
-    code += chars[
-      Math.floor(Math.random() * chars.length)
-    ];
+    code += chars[Math.floor(Math.random() * chars.length)];
   }
 
   return code;
 }
 
 async function createActivationCode(days = 30) {
-
   const code = generateCode();
-
   const expiresAt = addDaysIso(days);
 
   const { error } = await supabase
@@ -106,9 +86,7 @@ async function createActivationCode(days = 30) {
       expires_at: expiresAt
     });
 
-  if (error) {
-    throw error;
-  }
+  if (error) throw error;
 
   return {
     code,
@@ -118,17 +96,13 @@ async function createActivationCode(days = 30) {
 }
 
 async function getUserAccess(chatId) {
-
   const { data, error } = await supabase
     .from('users_access')
     .select('*')
     .eq('telegram_id', String(chatId))
     .single();
 
-  if (
-    error &&
-    error.code !== 'PGRST116'
-  ) {
+  if (error && error.code !== 'PGRST116') {
     throw error;
   }
 
@@ -136,28 +110,19 @@ async function getUserAccess(chatId) {
 }
 
 async function hasActiveAccess(chatId) {
-
-  const user =
-    await getUserAccess(chatId);
+  const user = await getUserAccess(chatId);
 
   if (!user) return false;
   if (!user.active) return false;
   if (!user.expires_at) return false;
 
-  return (
-    new Date(user.expires_at).getTime() >
-    Date.now()
-  );
+  return new Date(user.expires_at).getTime() > Date.now();
 }
 
 async function requireAccess(chatId) {
+  const access = await hasActiveAccess(chatId);
 
-  const access =
-    await hasActiveAccess(chatId);
-
-  if (access) {
-    return true;
-  }
+  if (access) return true;
 
   await bot.sendMessage(
     chatId,
@@ -175,87 +140,67 @@ async function requireAccess(chatId) {
 }
 
 async function redeemCode(chatId, code) {
-
   const cleanCode = String(code || '')
     .trim()
     .toUpperCase();
 
-  const {
-    data: activation,
-    error
-  } = await supabase
+  const { data: activation, error } = await supabase
     .from('activation_codes')
     .select('*')
     .eq('code', cleanCode)
     .single();
 
   if (error || !activation) {
-
     return {
       ok: false,
-      message:
-        '❌ كود التفعيل غير صحيح.'
+      message: '❌ كود التفعيل غير صحيح.'
     };
   }
 
   if (activation.used) {
-
     return {
       ok: false,
-      message:
-        '⚠️ هذا الكود مستخدم مسبقًا.'
+      message: '⚠️ هذا الكود مستخدم مسبقًا.'
     };
   }
 
   const expiresAt = activation.expires_at;
 
-  if (
-    !expiresAt ||
-    new Date(expiresAt).getTime() <
-      Date.now()
-  ) {
-
+  if (!expiresAt || new Date(expiresAt).getTime() < Date.now()) {
     return {
       ok: false,
-      message:
-        '⚠️ هذا الكود منتهي الصلاحية.'
+      message: '⚠️ هذا الكود منتهي الصلاحية.'
     };
   }
 
-  const { error: updateError } =
-    await supabase
-      .from('activation_codes')
-      .update({
-        used: true,
+  const { error: updateError } = await supabase
+    .from('activation_codes')
+    .update({
+      used: true,
+      telegram_id: String(chatId),
+      activated_at: nowIso()
+    })
+    .eq('code', cleanCode)
+    .eq('used', false);
+
+  if (updateError) throw updateError;
+
+  const { error: userError } = await supabase
+    .from('users_access')
+    .upsert(
+      {
         telegram_id: String(chatId),
-        activated_at: nowIso()
-      })
-      .eq('code', cleanCode)
-      .eq('used', false);
+        code_used: cleanCode,
+        expires_at: expiresAt,
+        active: true,
+        notified_3_days: false
+      },
+      {
+        onConflict: 'telegram_id'
+      }
+    );
 
-  if (updateError) {
-    throw updateError;
-  }
-
-  const { error: userError } =
-    await supabase
-      .from('users_access')
-      .upsert(
-        {
-          telegram_id: String(chatId),
-          code_used: cleanCode,
-          expires_at: expiresAt,
-          active: true,
-          notified_3_days: false
-        },
-        {
-          onConflict: 'telegram_id'
-        }
-      );
-
-  if (userError) {
-    throw userError;
-  }
+  if (userError) throw userError;
 
   return {
     ok: true,
@@ -274,12 +219,7 @@ ${formatDate(expiresAt)}
 // =====================
 
 function fmt(n) {
-
-  if (
-    n === undefined ||
-    n === null ||
-    isNaN(Number(n))
-  ) {
+  if (n === undefined || n === null || isNaN(Number(n))) {
     return 'غير متوفر';
   }
 
@@ -287,12 +227,7 @@ function fmt(n) {
 }
 
 function fmtPrice(n) {
-
-  if (
-    n === undefined ||
-    n === null ||
-    isNaN(Number(n))
-  ) {
+  if (n === undefined || n === null || isNaN(Number(n))) {
     return 'غير متوفر';
   }
 
@@ -300,12 +235,7 @@ function fmtPrice(n) {
 }
 
 function fmtPercent(n) {
-
-  if (
-    n === undefined ||
-    n === null ||
-    isNaN(Number(n))
-  ) {
+  if (n === undefined || n === null || isNaN(Number(n))) {
     return 'غير متوفر';
   }
 
@@ -317,95 +247,22 @@ function nowSeconds() {
 }
 
 function canRequest(chatId) {
-
-  const last =
-    userCooldown.get(chatId) || 0;
-
-  const diff =
-    nowSeconds() - last;
+  const last = userCooldown.get(chatId) || 0;
+  const diff = nowSeconds() - last;
 
   if (diff < USER_COOLDOWN_SECONDS) {
-
     return {
       ok: false,
-      wait:
-        USER_COOLDOWN_SECONDS - diff
+      wait: USER_COOLDOWN_SECONDS - diff
     };
   }
 
-  userCooldown.set(
-    chatId,
-    nowSeconds()
-  );
-
+  userCooldown.set(chatId, nowSeconds());
   return { ok: true };
 }
 
-async function apiGet(url) {
-
-  if (!API_KEY) {
-    throw new Error(
-      'Missing MASSIVE_API_KEY'
-    );
-  }
-
-  const res = await fetch(url);
-
-  const data = await res.json();
-
-  if (!res.ok) {
-
-    throw new Error(
-      data?.error ||
-      data?.message ||
-      'API Error'
-    );
-  }
-
-  return data;
-}
-
-async function getStockSnapshot(symbol) {
-
-  const url =
-`https://api.massive.com/v2/aggs/ticker/${symbol}/prev?adjusted=true&apiKey=${API_KEY}`;
-
-  const data = await apiGet(url);
-
-  const r = data?.results?.[0];
-
-  if (!r) {
-    return null;
-  }
-
-  const change = r.o
-    ? ((r.c - r.o) / r.o) * 100
-    : null;
-
-  return {
-    price: r.c,
-    open: r.o,
-    high: r.h,
-    low: r.l,
-    volume: r.v,
-    change
-  };
-}
-async function getOptionsChain(symbol) {
-
-  const url =
-`https://api.massive.com/v3/snapshot/options/${symbol}?limit=250&apiKey=${API_KEY}`;
-
-  const data =
-    await apiGet(url);
-
-  return data.results || [];
-}
-
 function getContractType(item) {
-  return String(
-    item?.details?.contract_type || ''
-  ).toLowerCase();
+  return String(item?.details?.contract_type || '').toLowerCase();
 }
 
 function getStrike(item) {
@@ -441,62 +298,76 @@ function getTheta(item) {
 }
 
 function gammaText(gamma) {
-
   const g = Number(gamma);
 
-  if (
-    gamma === undefined ||
-    gamma === null ||
-    isNaN(g)
-  ) {
+  if (gamma === undefined || gamma === null || isNaN(g)) {
     return 'غير متوفر';
   }
 
-  if (g >= 0.08) {
-    return 'مرتفع جدًا';
-  }
-
-  if (g >= 0.04) {
-    return 'مرتفع';
-  }
-
-  if (g >= 0.02) {
-    return 'متوسط';
-  }
+  if (g >= 0.08) return 'مرتفع جدًا';
+  if (g >= 0.04) return 'مرتفع';
+  if (g >= 0.02) return 'متوسط';
 
   return 'منخفض';
 }
 
 function scoreContract(item) {
-  return (
-    getVolume(item) +
-    getOI(item)
-  );
+  return getVolume(item) + getOI(item);
+}
+async function apiGet(url) {
+  if (!API_KEY) {
+    throw new Error('Missing MASSIVE_API_KEY');
+  }
+
+  const res = await fetch(url);
+  const data = await res.json();
+
+  if (!res.ok) {
+    throw new Error(data?.error || data?.message || 'API Error');
+  }
+
+  return data;
 }
 
-function topContracts(
-  chain,
-  type,
-  count = 3
-) {
+async function getStockSnapshot(symbol) {
+  const url =
+    `https://api.massive.com/v2/aggs/ticker/${symbol}/prev?adjusted=true&apiKey=${API_KEY}`;
 
+  const data = await apiGet(url);
+  const r = data?.results?.[0];
+
+  if (!r) return null;
+
+  const change = r.o ? ((r.c - r.o) / r.o) * 100 : null;
+
+  return {
+    price: r.c,
+    open: r.o,
+    high: r.h,
+    low: r.l,
+    volume: r.v,
+    change
+  };
+}
+
+async function getOptionsChain(symbol) {
+  const url =
+    `https://api.massive.com/v3/snapshot/options/${symbol}?limit=250&apiKey=${API_KEY}`;
+
+  const data = await apiGet(url);
+
+  return data.results || [];
+}
+
+function topContracts(chain, type, count = 3) {
   return chain
-    .filter(
-      x =>
-        getContractType(x) === type
-    )
-    .sort(
-      (a, b) =>
-        scoreContract(b) -
-        scoreContract(a)
-    )
+    .filter(x => getContractType(x) === type)
+    .sort((a, b) => scoreContract(b) - scoreContract(a))
     .slice(0, count);
 }
 
 function nearestSupportResistance(stock) {
-
   if (!stock) {
-
     return {
       support: 'غير متوفر',
       resistance: 'غير متوفر'
@@ -510,201 +381,97 @@ function nearestSupportResistance(stock) {
 }
 
 function momentumText(stock) {
-
-  if (
-    !stock ||
-    stock.change === null ||
-    stock.change === undefined
-  ) {
+  if (!stock || stock.change === null || stock.change === undefined) {
     return 'غير متوفر';
   }
 
-  if (stock.change > 1) {
-    return '🔥 صاعد قوي';
-  }
-
-  if (stock.change > 0) {
-    return '🟢 صاعد';
-  }
-
-  if (stock.change < -1) {
-    return '🔴 هابط قوي';
-  }
-
-  if (stock.change < 0) {
-    return '🔴 هابط';
-  }
+  if (stock.change > 1) return '🔥 صاعد قوي';
+  if (stock.change > 0) return '🟢 صاعد';
+  if (stock.change < -1) return '🔴 هابط قوي';
+  if (stock.change < 0) return '🔴 هابط';
 
   return '⚪ محايد';
 }
 
 function formatContracts(title, list) {
-
   if (!list.length) {
-
-    return `${title}
-
-⚠️ لا توجد بيانات متاحة حالياً.
-
-لم يتم تفعيل اشتراك البيانات المباشرة للمالك بعد.
-`;
+    return `${title}\nلا توجد بيانات متاحة\n`;
   }
 
-  return (
-`${title}
-
-` +
-
-list.map((x, i) =>
+  return `${title}\n\n` +
+    list.map((x, i) =>
 `${i + 1}) Strike [${getStrike(x)}]
-
-📦 الحجم:
-${fmt(getVolume(x))}
-
-📂 OI:
-${fmt(getOI(x))}
-
-📅 الانتهاء:
-${getExpiration(x)}`
-).join('\n\n')
-
-+ '\n'
-  );
+📦 الحجم: ${fmt(getVolume(x))}
+📂 OI: ${fmt(getOI(x))}
+📅 الانتهاء: ${getExpiration(x)}`
+    ).join('\n\n') + '\n';
 }
 
-function getStrongestContract(
-  calls,
-  puts
-) {
-
+function getStrongestContract(calls, puts) {
   const all = [
-    ...calls.map(x => ({
-      item: x,
-      side: 'CALL'
-    })),
-
-    ...puts.map(x => ({
-      item: x,
-      side: 'PUT'
-    }))
+    ...calls.map(x => ({ item: x, side: 'CALL' })),
+    ...puts.map(x => ({ item: x, side: 'PUT' }))
   ];
 
-  if (!all.length) {
-    return null;
-  }
+  if (!all.length) return null;
 
-  all.sort(
-    (a, b) =>
-      scoreContract(b.item) -
-      scoreContract(a.item)
-  );
+  all.sort((a, b) => scoreContract(b.item) - scoreContract(a.item));
 
   return all[0];
 }
 
-function strongestFocus(
-  calls,
-  puts
-) {
+function strongestFocus(calls, puts) {
+  const strongest = getStrongestContract(calls, puts);
 
-  const strongest =
-    getStrongestContract(
-      calls,
-      puts
-    );
+  if (!strongest) return 'غير متوفر';
 
-  if (!strongest) {
-    return 'غير متوفر';
-  }
-
-  return `
-${strongest.side}
-${getStrike(strongest.item)}
-`;
+  return `${strongest.side} ${getStrike(strongest.item)}`;
 }
 
-function strongestContractDetails(
-  calls,
-  puts
-) {
-
-  const strongest =
-    getStrongestContract(
-      calls,
-      puts
-    );
+function strongestContractDetails(calls, puts) {
+  const strongest = getStrongestContract(calls, puts);
 
   if (!strongest) {
-
     return `📊 بيانات العقد الأقوى:
 غير متوفر`;
   }
 
-  const item =
-    strongest.item;
+  const item = strongest.item;
 
-  const delta =
-    getDelta(item);
+  const delta = getDelta(item);
+  const gamma = getGamma(item);
+  const iv = getIV(item);
+  const theta = getTheta(item);
 
-  const gamma =
-    getGamma(item);
-
-  const iv =
-    getIV(item);
-
-  const theta =
-    getTheta(item);
-
-  return `
-📊 بيانات العقد الأقوى
-
-Δ Delta:
-${
-  delta !== undefined &&
-  delta !== null
+  return `📊 بيانات العقد الأقوى:
+Δ Delta: ${
+  delta !== undefined && delta !== null
     ? Number(delta).toFixed(2)
     : 'غير متوفر'
 }
-
-Γ Gamma:
-${gammaText(gamma)}
-
-IV:
-${
-  iv !== undefined &&
-  iv !== null
+Γ Gamma: ${gammaText(gamma)}
+IV: ${
+  iv !== undefined && iv !== null
     ? fmtPercent(Number(iv) * 100)
     : 'غير متوفر'
 }
-
-Θ Theta:
-${
-  theta !== undefined &&
-  theta !== null
+Θ Theta: ${
+  theta !== undefined && theta !== null
     ? Number(theta).toFixed(2)
     : 'غير متوفر'
+}`;
 }
-`;
-}
 
-function biasText(
-  calls,
-  puts
-) {
+function biasText(calls, puts) {
+  const totalCall = calls.reduce(
+    (s, x) => s + scoreContract(x),
+    0
+  );
 
-  const totalCall =
-    calls.reduce(
-      (s, x) =>
-        s + scoreContract(x),
-      0
-    );
-
-  const totalPut =
-    puts.reduce(
-      (s, x) =>
-        s + scoreContract(x),
-      0
-    );
+  const totalPut = puts.reduce(
+    (s, x) => s + scoreContract(x),
+    0
+  );
 
   if (totalCall > totalPut) {
     return '🟢 الكول أقوى';
@@ -718,53 +485,32 @@ function biasText(
 }
 
 async function buildFlowMessage(symbol) {
-
-  const cached =
-    CACHE.get(symbol);
+  const cached = CACHE.get(symbol);
 
   if (
     cached &&
-    nowSeconds() - cached.time <
-    CACHE_SECONDS
+    nowSeconds() - cached.time < CACHE_SECONDS
   ) {
     return cached.message;
   }
 
-  const stock =
-    await getStockSnapshot(symbol);
+  const stock = await getStockSnapshot(symbol);
+  const chain = await getOptionsChain(symbol);
 
-  const chain =
-    await getOptionsChain(symbol);
+  const calls = topContracts(chain, 'call', 3);
+  const puts = topContracts(chain, 'put', 3);
 
-  const calls =
-    topContracts(chain, 'call', 3);
+  const sr = nearestSupportResistance(stock);
+  const momentum = momentumText(stock);
 
-  const puts =
-    topContracts(chain, 'put', 3);
+  const focus = strongestFocus(calls, puts);
 
-  const sr =
-    nearestSupportResistance(stock);
+  const details = strongestContractDetails(
+    calls,
+    puts
+  );
 
-  const momentum =
-    momentumText(stock);
-
-  const focus =
-    strongestFocus(
-      calls,
-      puts
-    );
-
-  const details =
-    strongestContractDetails(
-      calls,
-      puts
-    );
-
-  const bias =
-    biasText(
-      calls,
-      puts
-    );
+  const bias = biasText(calls, puts);
 
   const price = stock
     ? fmtPrice(stock.price)
@@ -780,16 +526,9 @@ async function buildFlowMessage(symbol) {
   const message =
 `📊 تدفق عقود ${symbol}
 
-💰 السعر الحالي:
-${price}
-
-📈 التغير:
-${change}
-
-🔥 الزخم:
-${momentum}
-
-━━━━━━━━━━━━━━
+💰 السعر الحالي: ${price}
+📈 التغير: ${change}
+🔥 الزخم: ${momentum}
 
 📍 المقاومة الأقرب:
 ${fmtPrice(sr.resistance)}
@@ -797,17 +536,20 @@ ${fmtPrice(sr.resistance)}
 📍 الدعم الأقرب:
 ${fmtPrice(sr.support)}
 
+⚠️ اختراق المقاومة = استمرار صعود
+⚠️ كسر الدعم = ضعف واحتمال هبوط
+
 ━━━━━━━━━━━━━━
 
 ${formatContracts(
-  '🟢 أعلى عقود CALL',
+  '🟢 أعلى 3 عقود CALL',
   calls
 )}
 
 ━━━━━━━━━━━━━━
 
 ${formatContracts(
-  '🔴 أعلى عقود PUT',
+  '🔴 أعلى 3 عقود PUT',
   puts
 )}
 
@@ -830,4 +572,91 @@ ${bias}
   });
 
   return message;
+}
+
+async function checkExpiringSubscriptions() {
+  try {
+
+    const now = new Date();
+
+    const warningDate = new Date(
+      now.getTime() +
+      EXPIRY_WARNING_DAYS *
+      24 *
+      60 *
+      60 *
+      1000
+    );
+
+    const { data: users, error } =
+      await supabase
+        .from('users_access')
+        .select('*')
+        .eq('active', true);
+
+    if (error) {
+      throw error;
+    }
+
+    for (const user of users || []) {
+
+      if (!user.expires_at) {
+        continue;
+      }
+
+      const expiry = new Date(user.expires_at);
+
+      const alreadyNotified =
+        user.notified_3_days === true;
+
+      const isWithinWarning =
+        expiry <= warningDate &&
+        expiry > now;
+
+      if (
+        isWithinWarning &&
+        !alreadyNotified
+      ) {
+
+        try {
+
+          await bot.sendMessage(
+            user.telegram_id,
+`⚠️ تنبيه اشتراك
+
+اشتراكك سينتهي خلال 3 أيام.
+
+📅 تاريخ الانتهاء:
+${formatDate(user.expires_at)}
+
+للتجديد تواصل مع الإدارة.`
+          );
+
+          await supabase
+            .from('users_access')
+            .update({
+              notified_3_days: true
+            })
+            .eq(
+              'telegram_id',
+              user.telegram_id
+            );
+
+        } catch (err) {
+
+          console.error(
+            'Notification Error:',
+            err.message
+          );
+        }
+      }
+    }
+
+  } catch (err) {
+
+    console.error(
+      'Expiry Check Error:',
+      err.message
+    );
+  }
 }
