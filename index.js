@@ -23,6 +23,9 @@ const CACHE_SECONDS = 60;
 const UPDATE_INTERVAL_MS = 60 * 1000;
 const UPDATE_DURATION_MS = 5 * 60 * 1000;
 
+const EXPIRY_WARNING_DAYS = 3;
+const CHECK_EXPIRY_INTERVAL = 12 * 60 * 60 * 1000;
+
 // =====================
 // Subscription System
 // =====================
@@ -189,7 +192,8 @@ async function redeemCode(chatId, code) {
         telegram_id: String(chatId),
         code_used: cleanCode,
         expires_at: expiresAt,
-        active: true
+        active: true,
+        notified_3_days: false
       },
       {
         onConflict: 'telegram_id'
@@ -351,6 +355,7 @@ async function getOptionsChain(symbol) {
     `https://api.massive.com/v3/snapshot/options/${symbol}?limit=250&apiKey=${API_KEY}`;
 
   const data = await apiGet(url);
+
   return data.results || [];
 }
 
@@ -411,6 +416,7 @@ function getStrongestContract(calls, puts) {
   if (!all.length) return null;
 
   all.sort((a, b) => scoreContract(b.item) - scoreContract(a.item));
+
   return all[0];
 }
 
@@ -431,6 +437,7 @@ function strongestContractDetails(calls, puts) {
   }
 
   const item = strongest.item;
+
   const delta = getDelta(item);
   const gamma = getGamma(item);
   const iv = getIV(item);
@@ -438,29 +445,41 @@ function strongestContractDetails(calls, puts) {
 
   return `📊 بيانات العقد الأقوى:
 Δ Delta: ${
-    delta !== undefined && delta !== null
-      ? Number(delta).toFixed(2)
-      : 'غير متوفر'
-  }
+  delta !== undefined && delta !== null
+    ? Number(delta).toFixed(2)
+    : 'غير متوفر'
+}
 Γ Gamma: ${gammaText(gamma)}
 IV: ${
-    iv !== undefined && iv !== null
-      ? fmtPercent(Number(iv) * 100)
-      : 'غير متوفر'
-  }
+  iv !== undefined && iv !== null
+    ? fmtPercent(Number(iv) * 100)
+    : 'غير متوفر'
+}
 Θ Theta: ${
-    theta !== undefined && theta !== null
-      ? Number(theta).toFixed(2)
-      : 'غير متوفر'
-  }`;
+  theta !== undefined && theta !== null
+    ? Number(theta).toFixed(2)
+    : 'غير متوفر'
+}`;
 }
 
 function biasText(calls, puts) {
-  const totalCall = calls.reduce((s, x) => s + scoreContract(x), 0);
-  const totalPut = puts.reduce((s, x) => s + scoreContract(x), 0);
+  const totalCall = calls.reduce(
+    (s, x) => s + scoreContract(x),
+    0
+  );
 
-  if (totalCall > totalPut) return '🟢 الكول أقوى';
-  if (totalPut > totalCall) return '🔴 البوت أقوى';
+  const totalPut = puts.reduce(
+    (s, x) => s + scoreContract(x),
+    0
+  );
+
+  if (totalCall > totalPut) {
+    return '🟢 الكول أقوى';
+  }
+
+  if (totalPut > totalCall) {
+    return '🔴 البوت أقوى';
+  }
 
   return '⚪ متوازن';
 }
@@ -468,7 +487,10 @@ function biasText(calls, puts) {
 async function buildFlowMessage(symbol) {
   const cached = CACHE.get(symbol);
 
-  if (cached && nowSeconds() - cached.time < CACHE_SECONDS) {
+  if (
+    cached &&
+    nowSeconds() - cached.time < CACHE_SECONDS
+  ) {
     return cached.message;
   }
 
@@ -480,14 +502,24 @@ async function buildFlowMessage(symbol) {
 
   const sr = nearestSupportResistance(stock);
   const momentum = momentumText(stock);
+
   const focus = strongestFocus(calls, puts);
-  const details = strongestContractDetails(calls, puts);
+
+  const details = strongestContractDetails(
+    calls,
+    puts
+  );
+
   const bias = biasText(calls, puts);
 
-  const price = stock ? fmtPrice(stock.price) : 'غير متوفر';
+  const price = stock
+    ? fmtPrice(stock.price)
+    : 'غير متوفر';
 
   const change =
-    stock && stock.change !== null && stock.change !== undefined
+    stock &&
+    stock.change !== null &&
+    stock.change !== undefined
       ? fmtPercent(stock.change)
       : 'غير متوفر';
 
@@ -509,11 +541,17 @@ ${fmtPrice(sr.support)}
 
 ━━━━━━━━━━━━━━
 
-${formatContracts('🟢 أعلى 3 عقود CALL', calls)}
+${formatContracts(
+  '🟢 أعلى 3 عقود CALL',
+  calls
+)}
 
 ━━━━━━━━━━━━━━
 
-${formatContracts('🔴 أعلى 3 عقود PUT', puts)}
+${formatContracts(
+  '🔴 أعلى 3 عقود PUT',
+  puts
+)}
 
 ━━━━━━━━━━━━━━
 
@@ -536,11 +574,103 @@ ${bias}
   return message;
 }
 
+async function checkExpiringSubscriptions() {
+  try {
+
+    const now = new Date();
+
+    const warningDate = new Date(
+      now.getTime() +
+      EXPIRY_WARNING_DAYS *
+      24 *
+      60 *
+      60 *
+      1000
+    );
+
+    const { data: users, error } =
+      await supabase
+        .from('users_access')
+        .select('*')
+        .eq('active', true);
+
+    if (error) {
+      throw error;
+    }
+
+    for (const user of users || []) {
+
+      if (!user.expires_at) {
+        continue;
+      }
+
+      const expiry = new Date(user.expires_at);
+
+      const alreadyNotified =
+        user.notified_3_days === true;
+
+      const isWithinWarning =
+        expiry <= warningDate &&
+        expiry > now;
+
+      if (
+        isWithinWarning &&
+        !alreadyNotified
+      ) {
+
+        try {
+
+          await bot.sendMessage(
+            user.telegram_id,
+`⚠️ تنبيه اشتراك
+
+اشتراكك سينتهي خلال 3 أيام.
+
+📅 تاريخ الانتهاء:
+${formatDate(user.expires_at)}
+
+للتجديد تواصل مع الإدارة.`
+          );
+
+          await supabase
+            .from('users_access')
+            .update({
+              notified_3_days: true
+            })
+            .eq(
+              'telegram_id',
+              user.telegram_id
+            );
+
+        } catch (err) {
+
+          console.error(
+            'Notification Error:',
+            err.message
+          );
+        }
+      }
+    }
+
+  } catch (err) {
+
+    console.error(
+      'Expiry Check Error:',
+      err.message
+    );
+  }
+}
+
 function clearUpdate(chatId) {
   const active = activeUpdates.get(chatId);
 
-  if (active?.intervalId) clearInterval(active.intervalId);
-  if (active?.timeoutId) clearTimeout(active.timeoutId);
+  if (active?.intervalId) {
+    clearInterval(active.intervalId);
+  }
+
+  if (active?.timeoutId) {
+    clearTimeout(active.timeoutId);
+  }
 
   activeUpdates.delete(chatId);
 }
@@ -549,10 +679,19 @@ function startAutoUpdate(chatId, symbol) {
   clearUpdate(chatId);
 
   const intervalId = setInterval(async () => {
+
     try {
-      const msg = await buildFlowMessage(symbol);
-      await bot.sendMessage(chatId, msg);
+
+      const msg =
+        await buildFlowMessage(symbol);
+
+      await bot.sendMessage(
+        chatId,
+        msg
+      );
+
     } catch (err) {
+
       console.error(err);
 
       await bot.sendMessage(
@@ -562,15 +701,18 @@ function startAutoUpdate(chatId, symbol) {
 
       clearUpdate(chatId);
     }
+
   }, UPDATE_INTERVAL_MS);
 
   const timeoutId = setTimeout(async () => {
+
     clearUpdate(chatId);
 
     await bot.sendMessage(
       chatId,
       `✅ انتهت متابعة ${symbol} لمدة 5 دقائق.`
     );
+
   }, UPDATE_DURATION_MS);
 
   activeUpdates.set(chatId, {
@@ -582,37 +724,49 @@ function startAutoUpdate(chatId, symbol) {
 
 async function sendFlow(chatId, symbol) {
   try {
-    const access = await requireAccess(chatId);
+
+    const access =
+      await requireAccess(chatId);
 
     if (!access) return;
 
     const check = canRequest(chatId);
 
     if (!check.ok) {
+
       await bot.sendMessage(
         chatId,
         `⏳ انتظر ${check.wait} ثواني قبل طلب جديد.`
       );
+
       return;
     }
 
-    await bot.sendMessage(chatId, `⏳ جاري جلب بيانات ${symbol}...`);
+    await bot.sendMessage(
+      chatId,
+      `⏳ جاري جلب بيانات ${symbol}...`
+    );
 
-    const msg = await buildFlowMessage(symbol);
+    const msg =
+      await buildFlowMessage(symbol);
 
     await bot.sendMessage(chatId, msg);
 
     startAutoUpdate(chatId, symbol);
+
   } catch (err) {
+
     console.error(err);
 
-    const message = String(err.message || '');
+    const message =
+      String(err.message || '');
 
     const entitlement =
       message.toLowerCase().includes('not entitled') ||
       message.toLowerCase().includes('entitled');
 
     if (entitlement) {
+
       await bot.sendMessage(
         chatId,
 `⚠️ اشتراك Massive الحالي لا يدعم بيانات الأوبشن.
@@ -626,7 +780,12 @@ Options Snapshot`
       return;
     }
 
-    if (message.includes('Missing MASSIVE_API_KEY')) {
+    if (
+      message.includes(
+        'Missing MASSIVE_API_KEY'
+      )
+    ) {
+
       await bot.sendMessage(
         chatId,
 `⚠️ مفتاح MASSIVE_API_KEY غير موجود.
@@ -637,7 +796,10 @@ Options Snapshot`
       return;
     }
 
-    await bot.sendMessage(chatId, `حدث خطأ:\n${message}`);
+    await bot.sendMessage(
+      chatId,
+      `حدث خطأ:\n${message}`
+    );
   }
 }
 
@@ -646,6 +808,7 @@ Options Snapshot`
 // =====================
 
 bot.onText(/\/start/, async (msg) => {
+
   await bot.sendMessage(
     msg.chat.id,
 `🚀 مرحبًا بك في ST Flow Stocks
@@ -657,20 +820,12 @@ bot.onText(/\/start/, async (msg) => {
 /redeem CODE
 
 مثال:
-/redeem ST-ABCD-1234
-
-بعد التفعيل:
-اكتب رمز الشركة مباشرة مثل:
-
-TSLA
-AAPL
-NVDA
-AMD
-SPY`
+/redeem ST-ABCD-1234`
   );
 });
 
 bot.onText(/\/myid/, async (msg) => {
+
   await bot.sendMessage(
     msg.chat.id,
     `🆔 Telegram ID:\n${msg.chat.id}`
@@ -678,11 +833,22 @@ bot.onText(/\/myid/, async (msg) => {
 });
 
 bot.onText(/\/redeem (.+)/, async (msg, match) => {
-  try {
-    const result = await redeemCode(msg.chat.id, match[1]);
 
-    await bot.sendMessage(msg.chat.id, result.message);
+  try {
+
+    const result =
+      await redeemCode(
+        msg.chat.id,
+        match[1]
+      );
+
+    await bot.sendMessage(
+      msg.chat.id,
+      result.message
+    );
+
   } catch (err) {
+
     console.error(err);
 
     await bot.sendMessage(
@@ -693,10 +859,14 @@ bot.onText(/\/redeem (.+)/, async (msg, match) => {
 });
 
 bot.onText(/\/status/, async (msg) => {
+
   try {
-    const sub = await getUserAccess(msg.chat.id);
+
+    const sub =
+      await getUserAccess(msg.chat.id);
 
     if (!sub) {
+
       await bot.sendMessage(
         msg.chat.id,
 `🔒 لا يوجد اشتراك فعال.
@@ -704,10 +874,12 @@ bot.onText(/\/status/, async (msg) => {
 للتفعيل:
 /redeem CODE`
       );
+
       return;
     }
 
-    const active = await hasActiveAccess(msg.chat.id);
+    const active =
+      await hasActiveAccess(msg.chat.id);
 
     await bot.sendMessage(
       msg.chat.id,
@@ -719,7 +891,9 @@ ${sub.code_used || 'غير متوفر'}
 ينتهي في:
 ${formatDate(sub.expires_at)}`
     );
+
   } catch (err) {
+
     console.error(err);
 
     await bot.sendMessage(
@@ -730,23 +904,24 @@ ${formatDate(sub.expires_at)}`
 });
 
 bot.onText(/\/gencode(?:\s+(\d+))?/, async (msg, match) => {
+
   try {
+
     if (!isAdmin(msg.chat.id)) {
-      await bot.sendMessage(msg.chat.id, '⛔ هذا الأمر للأدمن فقط.');
-      return;
-    }
 
-    const days = Number(match[1] || 30);
-
-    if (!Number.isFinite(days) || days <= 0) {
       await bot.sendMessage(
         msg.chat.id,
-        '⚠️ اكتب مدة صحيحة. مثال: /gencode 30'
+        '⛔ هذا الأمر للأدمن فقط.'
       );
+
       return;
     }
 
-    const result = await createActivationCode(days);
+    const days =
+      Number(match[1] || 30);
+
+    const result =
+      await createActivationCode(days);
 
     await bot.sendMessage(
       msg.chat.id,
@@ -758,14 +933,16 @@ ${result.code}
 المدة:
 ${days} يوم
 
-ينتهي الكود في:
+ينتهي في:
 ${formatDate(result.expiresAt)}
 
 طريقة التفعيل:
 
 /redeem ${result.code}`
     );
+
   } catch (err) {
+
     console.error(err);
 
     await bot.sendMessage(
@@ -776,6 +953,7 @@ ${formatDate(result.expiresAt)}
 });
 
 bot.onText(/\/help/, async (msg) => {
+
   await bot.sendMessage(
     msg.chat.id,
 `❓ الأوامر المتاحة
@@ -792,6 +970,7 @@ bot.onText(/\/help/, async (msg) => {
 });
 
 bot.onText(/\/stop/, async (msg) => {
+
   clearUpdate(msg.chat.id);
 
   await bot.sendMessage(
@@ -801,17 +980,23 @@ bot.onText(/\/stop/, async (msg) => {
 });
 
 bot.on('message', async (msg) => {
+
   const text = msg.text;
 
   if (!text) return;
 
-  if (text.startsWith('/')) return;
+  if (text.startsWith('/')) {
+    return;
+  }
 
-  const symbol = text.trim().toUpperCase();
+  const symbol =
+    text.trim().toUpperCase();
 
-  const valid = /^[A-Z]{1,5}$/.test(symbol);
+  const valid =
+    /^[A-Z]{1,5}$/.test(symbol);
 
   if (!valid) {
+
     await bot.sendMessage(
       msg.chat.id,
 `⚠️ الرمز غير صحيح.
@@ -831,4 +1016,12 @@ SPY`
   sendFlow(msg.chat.id, symbol);
 });
 
-console.log('ST Flow Stocks bot running...');
+checkExpiringSubscriptions();
+
+setInterval(() => {
+  checkExpiringSubscriptions();
+}, CHECK_EXPIRY_INTERVAL);
+
+console.log(
+  'ST Flow Stocks bot running...'
+);
