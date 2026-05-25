@@ -6,12 +6,16 @@ const API_KEY = process.env.MASSIVE_API_KEY;
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+
 const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
   .split(',')
   .map(x => x.trim())
   .filter(Boolean);
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+const supabase = createClient(
+  SUPABASE_URL,
+  SUPABASE_SERVICE_KEY
+);
 
 const userCooldown = new Map();
 const CACHE = new Map();
@@ -38,6 +42,7 @@ function addDaysIso(days) {
 
 function formatDate(v) {
   if (!v) return 'غير متوفر';
+
   return new Date(v).toLocaleString('ar-SA', {
     year: 'numeric',
     month: 'long',
@@ -52,13 +57,26 @@ function isAdmin(chatId) {
 }
 
 function generateCode() {
-  const part1 = Math.random().toString(36).substring(2, 6).toUpperCase();
-  const part2 = Math.random().toString(36).substring(2, 6).toUpperCase();
-  return `ST-${part1}-${part2}`;
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+  let code = 'ST-';
+
+  for (let i = 0; i < 4; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+
+  code += '-';
+
+  for (let i = 0; i < 4; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+
+  return code;
 }
 
 async function createActivationCode(days = 30) {
   const code = generateCode();
+
   const expiresAt = addDaysIso(days);
 
   const { error } = await supabase
@@ -69,9 +87,15 @@ async function createActivationCode(days = 30) {
       expires_at: expiresAt
     });
 
-  if (error) throw error;
+  if (error) {
+    throw error;
+  }
 
-  return { code, days, expiresAt };
+  return {
+    code,
+    days,
+    expiresAt
+  };
 }
 
 async function getUserAccess(chatId) {
@@ -81,7 +105,10 @@ async function getUserAccess(chatId) {
     .eq('telegram_id', String(chatId))
     .single();
 
-  if (error && error.code !== 'PGRST116') throw error;
+  if (error && error.code !== 'PGRST116') {
+    throw error;
+  }
+
   return data || null;
 }
 
@@ -96,17 +123,19 @@ async function hasActiveAccess(chatId) {
 }
 
 async function requireAccess(chatId) {
-  const ok = await hasActiveAccess(chatId);
+  const access = await hasActiveAccess(chatId);
 
-  if (ok) return true;
+  if (access) {
+    return true;
+  }
 
   await bot.sendMessage(
     chatId,
 `🔒 البوت مخصص للمشتركين فقط.
 
-لتفعيل اشتراكك اكتب:
+لتفعيل اشتراكك:
 
-/redeem الكود
+/redeem CODE
 
 مثال:
 /redeem ST-ABCD-1234`
@@ -115,8 +144,10 @@ async function requireAccess(chatId) {
   return false;
 }
 
-async function redeemCode(chatId, username, code) {
-  const cleanCode = String(code || '').trim().toUpperCase();
+async function redeemCode(chatId, code) {
+  const cleanCode = String(code || '')
+    .trim()
+    .toUpperCase();
 
   const { data: activation, error } = await supabase
     .from('activation_codes')
@@ -125,16 +156,22 @@ async function redeemCode(chatId, username, code) {
     .single();
 
   if (error || !activation) {
-    return { ok: false, message: '❌ كود التفعيل غير صحيح.' };
+    return {
+      ok: false,
+      message: '❌ كود التفعيل غير صحيح.'
+    };
   }
 
   if (activation.used) {
-    return { ok: false, message: '⚠️ هذا الكود تم استخدامه مسبقًا.' };
+    return {
+      ok: false,
+      message: '⚠️ هذا الكود مستخدم مسبقًا.'
+    };
   }
 
   const expiresAt = addDaysIso(30);
 
-  const { error: updateCodeError } = await supabase
+  const { error: updateError } = await supabase
     .from('activation_codes')
     .update({
       used: true,
@@ -145,9 +182,11 @@ async function redeemCode(chatId, username, code) {
     .eq('code', cleanCode)
     .eq('used', false);
 
-  if (updateCodeError) throw updateCodeError;
+  if (updateError) {
+    throw updateError;
+  }
 
-  const { error: upsertError } = await supabase
+  const { error: userError } = await supabase
     .from('users_access')
     .upsert(
       {
@@ -156,22 +195,27 @@ async function redeemCode(chatId, username, code) {
         expires_at: expiresAt,
         active: true
       },
-      { onConflict: 'telegram_id' }
+      {
+        onConflict: 'telegram_id'
+      }
     );
 
-  if (upsertError) throw upsertError;
+  if (userError) {
+    throw userError;
+  }
 
   return {
     ok: true,
     message:
 `✅ تم تفعيل اشتراكك بنجاح.
 
-مدة الاشتراك: 30 يوم
+مدة الاشتراك:
+30 يوم
+
 ينتهي في:
 ${formatDate(expiresAt)}
 
-اكتب الآن رمز الشركة مثل:
-TSLA`
+يمكنك الآن استخدام البوت.`
   };
 }
 
@@ -180,17 +224,38 @@ TSLA`
 // =====================
 
 function fmt(n) {
-  if (n === undefined || n === null || isNaN(Number(n))) return 'غير متوفر';
+  if (
+    n === undefined ||
+    n === null ||
+    isNaN(Number(n))
+  ) {
+    return 'غير متوفر';
+  }
+
   return Number(n).toLocaleString('en-US');
 }
 
 function fmtPrice(n) {
-  if (n === undefined || n === null || isNaN(Number(n))) return 'غير متوفر';
+  if (
+    n === undefined ||
+    n === null ||
+    isNaN(Number(n))
+  ) {
+    return 'غير متوفر';
+  }
+
   return Number(n).toFixed(2);
 }
 
 function fmtPercent(n) {
-  if (n === undefined || n === null || isNaN(Number(n))) return 'غير متوفر';
+  if (
+    n === undefined ||
+    n === null ||
+    isNaN(Number(n))
+  ) {
+    return 'غير متوفر';
+  }
+
   return `${Number(n).toFixed(2)}%`;
 }
 
@@ -200,22 +265,29 @@ function nowSeconds() {
 
 function canRequest(chatId) {
   const last = userCooldown.get(chatId) || 0;
+
   const diff = nowSeconds() - last;
 
   if (diff < USER_COOLDOWN_SECONDS) {
-    return { ok: false, wait: USER_COOLDOWN_SECONDS - diff };
+    return {
+      ok: false,
+      wait: USER_COOLDOWN_SECONDS - diff
+    };
   }
 
   userCooldown.set(chatId, nowSeconds());
+
   return { ok: true };
 }
 
 function getContractType(item) {
-  return String(item?.details?.contract_type || '').toLowerCase();
+  return String(
+    item?.details?.contract_type || ''
+  ).toLowerCase();
 }
 
 function getStrike(item) {
-  return item?.details?.strike_price ?? 'غير متوفر';
+  return item?.details?.strike_price || 'غير متوفر';
 }
 
 function getVolume(item) {
@@ -248,38 +320,61 @@ function getTheta(item) {
 
 function gammaText(gamma) {
   const g = Number(gamma);
-  if (gamma === undefined || gamma === null || isNaN(g)) return 'غير متوفر';
+
+  if (
+    gamma === undefined ||
+    gamma === null ||
+    isNaN(g)
+  ) {
+    return 'غير متوفر';
+  }
+
   if (g >= 0.08) return 'مرتفع جدًا';
   if (g >= 0.04) return 'مرتفع';
   if (g >= 0.02) return 'متوسط';
+
   return 'منخفض';
 }
 
 function scoreContract(item) {
   return getVolume(item) + getOI(item);
 }
-
 async function apiGet(url) {
-  if (!API_KEY) throw new Error('Missing MASSIVE_API_KEY');
+  if (!API_KEY) {
+    throw new Error('Missing MASSIVE_API_KEY');
+  }
 
   const res = await fetch(url);
+
   const data = await res.json();
 
   if (!res.ok) {
-    throw new Error(data?.error || data?.message || 'API Error');
+    throw new Error(
+      data?.error ||
+      data?.message ||
+      'API Error'
+    );
   }
 
   return data;
 }
 
 async function getStockSnapshot(symbol) {
-  const url = `https://api.massive.com/v2/aggs/ticker/${symbol}/prev?adjusted=true&apiKey=${API_KEY}`;
+  const url =
+    `https://api.massive.com/v2/aggs/ticker/${symbol}/prev?adjusted=true&apiKey=${API_KEY}`;
+
   const data = await apiGet(url);
+
   const r = data?.results?.[0];
 
-  if (!r) return null;
+  if (!r) {
+    return null;
+  }
 
-  const change = r.o ? ((r.c - r.o) / r.o) * 100 : null;
+  const change =
+    r.o
+      ? ((r.c - r.o) / r.o) * 100
+      : null;
 
   return {
     price: r.c,
@@ -293,10 +388,10 @@ async function getStockSnapshot(symbol) {
 
 async function getOptionsChain(symbol) {
   const url =
-    `https://api.massive.com/v3/snapshot/options/${symbol}` +
-    `?limit=250&apiKey=${API_KEY}`;
+    `https://api.massive.com/v3/snapshot/options/${symbol}?limit=250&apiKey=${API_KEY}`;
 
   const data = await apiGet(url);
+
   return data.results || [];
 }
 
@@ -322,7 +417,11 @@ function nearestSupportResistance(stock) {
 }
 
 function momentumText(stock) {
-  if (!stock || stock.change === null || stock.change === undefined) {
+  if (
+    !stock ||
+    stock.change === null ||
+    stock.change === undefined
+  ) {
     return 'غير متوفر';
   }
 
@@ -339,35 +438,61 @@ function formatContracts(title, list) {
     return `${title}\nلا توجد بيانات متاحة\n`;
   }
 
-  return `${title}\n\n` +
+  return (
+    `${title}\n\n` +
     list.map((x, i) =>
 `${i + 1}) Strike [${getStrike(x)}]
 📦 الحجم: ${fmt(getVolume(x))}
 📂 OI: ${fmt(getOI(x))}
 📅 الانتهاء: ${getExpiration(x)}`
-    ).join('\n\n') + '\n';
+    ).join('\n\n') +
+    '\n'
+  );
 }
 
 function getStrongestContract(calls, puts) {
   const all = [
-    ...calls.map(x => ({ item: x, side: 'CALL' })),
-    ...puts.map(x => ({ item: x, side: 'PUT' }))
+    ...calls.map(x => ({
+      item: x,
+      side: 'CALL'
+    })),
+    ...puts.map(x => ({
+      item: x,
+      side: 'PUT'
+    }))
   ];
 
-  if (!all.length) return null;
+  if (!all.length) {
+    return null;
+  }
 
-  all.sort((a, b) => scoreContract(b.item) - scoreContract(a.item));
+  all.sort(
+    (a, b) =>
+      scoreContract(b.item) -
+      scoreContract(a.item)
+  );
+
   return all[0];
 }
 
 function strongestFocus(calls, puts) {
-  const strongest = getStrongestContract(calls, puts);
-  if (!strongest) return 'غير متوفر';
+  const strongest = getStrongestContract(
+    calls,
+    puts
+  );
+
+  if (!strongest) {
+    return 'غير متوفر';
+  }
+
   return `${strongest.side} ${getStrike(strongest.item)}`;
 }
 
 function strongestContractDetails(calls, puts) {
-  const strongest = getStrongestContract(calls, puts);
+  const strongest = getStrongestContract(
+    calls,
+    puts
+  );
 
   if (!strongest) {
     return `📊 بيانات العقد الأقوى:
@@ -375,24 +500,52 @@ function strongestContractDetails(calls, puts) {
   }
 
   const item = strongest.item;
+
   const delta = getDelta(item);
   const gamma = getGamma(item);
   const iv = getIV(item);
   const theta = getTheta(item);
 
   return `📊 بيانات العقد الأقوى:
-Δ Delta: ${delta !== undefined && delta !== null ? Number(delta).toFixed(2) : 'غير متوفر'}
+Δ Delta: ${
+    delta !== undefined &&
+    delta !== null
+      ? Number(delta).toFixed(2)
+      : 'غير متوفر'
+}
 Γ Gamma: ${gammaText(gamma)}
-IV: ${iv !== undefined && iv !== null ? fmtPercent(Number(iv) * 100) : 'غير متوفر'}
-Θ Theta: ${theta !== undefined && theta !== null ? Number(theta).toFixed(2) : 'غير متوفر'}`;
+IV: ${
+    iv !== undefined &&
+    iv !== null
+      ? fmtPercent(Number(iv) * 100)
+      : 'غير متوفر'
+}
+Θ Theta: ${
+    theta !== undefined &&
+    theta !== null
+      ? Number(theta).toFixed(2)
+      : 'غير متوفر'
+}`;
 }
 
 function biasText(calls, puts) {
-  const totalCall = calls.reduce((s, x) => s + scoreContract(x), 0);
-  const totalPut = puts.reduce((s, x) => s + scoreContract(x), 0);
+  const totalCall = calls.reduce(
+    (s, x) => s + scoreContract(x),
+    0
+  );
 
-  if (totalCall > totalPut) return '🟢 الكول أقوى';
-  if (totalPut > totalCall) return '🔴 البوت أقوى';
+  const totalPut = puts.reduce(
+    (s, x) => s + scoreContract(x),
+    0
+  );
+
+  if (totalCall > totalPut) {
+    return '🟢 الكول أقوى';
+  }
+
+  if (totalPut > totalCall) {
+    return '🔴 البوت أقوى';
+  }
 
   return '⚪ متوازن';
 }
@@ -400,25 +553,42 @@ function biasText(calls, puts) {
 async function buildFlowMessage(symbol) {
   const cached = CACHE.get(symbol);
 
-  if (cached && nowSeconds() - cached.time < CACHE_SECONDS) {
+  if (
+    cached &&
+    nowSeconds() - cached.time < CACHE_SECONDS
+  ) {
     return cached.message;
   }
 
   const stock = await getStockSnapshot(symbol);
+
   const chain = await getOptionsChain(symbol);
 
   const calls = topContracts(chain, 'call', 3);
+
   const puts = topContracts(chain, 'put', 3);
 
   const sr = nearestSupportResistance(stock);
+
   const momentum = momentumText(stock);
+
   const focus = strongestFocus(calls, puts);
-  const details = strongestContractDetails(calls, puts);
+
+  const details = strongestContractDetails(
+    calls,
+    puts
+  );
+
   const bias = biasText(calls, puts);
 
-  const price = stock ? fmtPrice(stock.price) : 'غير متوفر';
+  const price = stock
+    ? fmtPrice(stock.price)
+    : 'غير متوفر';
+
   const change =
-    stock && stock.change !== null && stock.change !== undefined
+    stock &&
+    stock.change !== null &&
+    stock.change !== undefined
       ? fmtPercent(stock.change)
       : 'غير متوفر';
 
@@ -428,19 +598,29 @@ async function buildFlowMessage(symbol) {
 💰 السعر الحالي: ${price}
 📈 التغير: ${change}
 🔥 الزخم: ${momentum}
-📍 المقاومة الأقرب: ${fmtPrice(sr.resistance)}
-📍 الدعم الأقرب: ${fmtPrice(sr.support)}
 
-⚠️ اختراق ${fmtPrice(sr.resistance)} = استمرار صعود
-⚠️ كسر ${fmtPrice(sr.support)} = ضعف واحتمال هبوط
+📍 المقاومة الأقرب:
+${fmtPrice(sr.resistance)}
+
+📍 الدعم الأقرب:
+${fmtPrice(sr.support)}
+
+⚠️ اختراق المقاومة = استمرار صعود
+⚠️ كسر الدعم = ضعف واحتمال هبوط
 
 ━━━━━━━━━━━━━━
 
-${formatContracts('🟢 أعلى 3 عقود CALL', calls)}
+${formatContracts(
+  '🟢 أعلى 3 عقود CALL',
+  calls
+)}
 
 ━━━━━━━━━━━━━━
 
-${formatContracts('🔴 أعلى 3 عقود PUT', puts)}
+${formatContracts(
+  '🔴 أعلى 3 عقود PUT',
+  puts
+)}
 
 ━━━━━━━━━━━━━━
 
@@ -466,8 +646,13 @@ ${bias}
 function clearUpdate(chatId) {
   const active = activeUpdates.get(chatId);
 
-  if (active?.intervalId) clearInterval(active.intervalId);
-  if (active?.timeoutId) clearTimeout(active.timeoutId);
+  if (active?.intervalId) {
+    clearInterval(active.intervalId);
+  }
+
+  if (active?.timeoutId) {
+    clearTimeout(active.timeoutId);
+  }
 
   activeUpdates.delete(chatId);
 }
@@ -478,42 +663,74 @@ function startAutoUpdate(chatId, symbol) {
   const intervalId = setInterval(async () => {
     try {
       const msg = await buildFlowMessage(symbol);
+
       await bot.sendMessage(chatId, msg);
+
     } catch (err) {
+
       console.error(err);
-      await bot.sendMessage(chatId, `⚠️ تعذر تحديث بيانات ${symbol}\n${err.message}`);
+
+      await bot.sendMessage(
+        chatId,
+        `⚠️ تعذر تحديث بيانات ${symbol}\n${err.message}`
+      );
+
       clearUpdate(chatId);
     }
   }, UPDATE_INTERVAL_MS);
 
   const timeoutId = setTimeout(async () => {
+
     clearUpdate(chatId);
-    await bot.sendMessage(chatId, `✅ انتهت متابعة ${symbol} التلقائية لمدة 5 دقائق.`);
+
+    await bot.sendMessage(
+      chatId,
+      `✅ انتهت متابعة ${symbol} لمدة 5 دقائق.`
+    );
+
   }, UPDATE_DURATION_MS);
 
-  activeUpdates.set(chatId, { symbol, intervalId, timeoutId });
+  activeUpdates.set(chatId, {
+    symbol,
+    intervalId,
+    timeoutId
+  });
 }
 
 async function sendFlow(chatId, symbol) {
   try {
+
     const access = await requireAccess(chatId);
-    if (!access) return;
+
+    if (!access) {
+      return;
+    }
 
     const check = canRequest(chatId);
 
     if (!check.ok) {
-      await bot.sendMessage(chatId, `⏳ انتظر ${check.wait} ثواني قبل طلب جديد.`);
+
+      await bot.sendMessage(
+        chatId,
+        `⏳ انتظر ${check.wait} ثواني قبل طلب جديد.`
+      );
+
       return;
     }
 
-    await bot.sendMessage(chatId, `⏳ جاري جلب بيانات ${symbol}...`);
+    await bot.sendMessage(
+      chatId,
+      `⏳ جاري جلب بيانات ${symbol}...`
+    );
 
     const msg = await buildFlowMessage(symbol);
 
     await bot.sendMessage(chatId, msg);
 
     startAutoUpdate(chatId, symbol);
+
   } catch (err) {
+
     console.error(err);
 
     const message = String(err.message || '');
@@ -523,35 +740,39 @@ async function sendFlow(chatId, symbol) {
       message.toLowerCase().includes('entitled');
 
     if (entitlement) {
+
       await bot.sendMessage(
         chatId,
-`⚠️ بيانات الأوبشن غير مفعلة في الاشتراك الحالي.
+`⚠️ اشتراك Massive الحالي لا يدعم بيانات الأوبشن.
 
 الخطة الحالية لا تسمح بسحب:
-Options Chain / Options Snapshot
 
-بعد تفعيل اشتراك الأوبشن سيعمل البوت مباشرة.`
+Options Chain
+Options Snapshot`
       );
+
       return;
     }
 
-    if (message.includes('Missing MASSIVE_API_KEY')) {
+    if (
+      message.includes(
+        'Missing MASSIVE_API_KEY'
+      )
+    ) {
+
       await bot.sendMessage(
         chatId,
 `⚠️ مفتاح MASSIVE_API_KEY غير موجود.
 
-أضفه في Railway:
-Variables → New Variable
-
-الاسم:
-MASSIVE_API_KEY`
+أضفه داخل Railway Variables.`
       );
+
       return;
     }
 
     await bot.sendMessage(
       chatId,
-      `حدث خطأ أثناء جلب بيانات ${symbol}\n${message}`
+      `حدث خطأ:\n${message}`
     );
   }
 }
@@ -560,54 +781,75 @@ MASSIVE_API_KEY`
 // Bot Commands
 // =====================
 
-bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(
+bot.onText(/\/start/, async (msg) => {
+
+  await bot.sendMessage(
     msg.chat.id,
 `🚀 مرحبًا بك في ST Flow Stocks
 
-🔒 البوت مخصص للمشتركين فقط.
+🔒 البوت للمشتركين فقط.
 
 لتفعيل اشتراكك:
+
 /redeem CODE
 
-بعد التفعيل اكتب رمز الشركة مباشرة:
+مثال:
+/redeem ST-ABCD-1234
+
+بعد التفعيل:
+اكتب رمز الشركة مباشرة مثل:
 
 TSLA
 AAPL
 NVDA
 AMD
-SPY
-QQQ
-
-لمعرفة حالة اشتراكك:
-/status`
+SPY`
   );
 });
 
-bot.onText(/\/myid/, (msg) => {
-  bot.sendMessage(msg.chat.id, `🆔 Telegram ID:\n${msg.chat.id}`);
+bot.onText(/\/myid/, async (msg) => {
+
+  await bot.sendMessage(
+    msg.chat.id,
+    `🆔 Telegram ID:\n${msg.chat.id}`
+  );
 });
 
 bot.onText(/\/redeem (.+)/, async (msg, match) => {
+
   try {
+
     const result = await redeemCode(
       msg.chat.id,
-      msg.from?.username || '',
       match[1]
     );
 
-    await bot.sendMessage(msg.chat.id, result.message);
+    await bot.sendMessage(
+      msg.chat.id,
+      result.message
+    );
+
   } catch (err) {
+
     console.error(err);
-    await bot.sendMessage(msg.chat.id, `حدث خطأ أثناء التفعيل:\n${err.message}`);
+
+    await bot.sendMessage(
+      msg.chat.id,
+      `حدث خطأ أثناء التفعيل:\n${err.message}`
+    );
   }
 });
 
 bot.onText(/\/status/, async (msg) => {
+
   try {
-    const sub = await getUserAccess(msg.chat.id);
+
+    const sub = await getUserAccess(
+      msg.chat.id
+    );
 
     if (!sub) {
+
       await bot.sendMessage(
         msg.chat.id,
 `🔒 لا يوجد اشتراك فعال.
@@ -615,33 +857,52 @@ bot.onText(/\/status/, async (msg) => {
 للتفعيل:
 /redeem CODE`
       );
+
       return;
     }
 
-    const active = await hasActiveAccess(msg.chat.id);
+    const active = await hasActiveAccess(
+      msg.chat.id
+    );
 
     await bot.sendMessage(
       msg.chat.id,
 `${active ? '✅ اشتراكك فعال' : '❌ اشتراكك منتهي'}
 
-الكود المستخدم: ${sub.code_used || 'غير متوفر'}
+الكود المستخدم:
+${sub.code_used || 'غير متوفر'}
+
 ينتهي في:
 ${formatDate(sub.expires_at)}`
     );
+
   } catch (err) {
+
     console.error(err);
-    await bot.sendMessage(msg.chat.id, `حدث خطأ:\n${err.message}`);
+
+    await bot.sendMessage(
+      msg.chat.id,
+      `حدث خطأ:\n${err.message}`
+    );
   }
 });
 
 bot.onText(/\/gencode(?:\s+(\d+))?/, async (msg, match) => {
+
   try {
+
     if (!isAdmin(msg.chat.id)) {
-      await bot.sendMessage(msg.chat.id, '⛔ هذا الأمر مخصص للأدمن فقط.');
+
+      await bot.sendMessage(
+        msg.chat.id,
+        '⛔ هذا الأمر للأدمن فقط.'
+      );
+
       return;
     }
 
     const days = Number(match[1] || 30);
+
     const result = await createActivationCode(days);
 
     await bot.sendMessage(
@@ -651,78 +912,89 @@ bot.onText(/\/gencode(?:\s+(\d+))?/, async (msg, match) => {
 الكود:
 ${result.code}
 
-المدة: ${days} يوم
+المدة:
+${days} يوم
 
-أرسله للعميل بهذا الشكل:
+طريقة التفعيل:
+
 /redeem ${result.code}`
     );
+
   } catch (err) {
+
     console.error(err);
-    await bot.sendMessage(msg.chat.id, `حدث خطأ أثناء إنشاء الكود:\n${err.message}`);
+
+    await bot.sendMessage(
+      msg.chat.id,
+      `حدث خطأ:\n${err.message}`
+    );
   }
 });
 
-bot.onText(/\/help/, (msg) => {
-  bot.sendMessage(
+bot.onText(/\/help/, async (msg) => {
+
+  await bot.sendMessage(
     msg.chat.id,
-`❓ طريقة الاستخدام
+`❓ الأوامر المتاحة
 
-1) فعّل الاشتراك:
-/redeem CODE
-
-2) اكتب رمز الشركة:
-TSLA
-AAPL
-NVDA
-AMD
-SPY
-QQQ
-
-3) حالة الاشتراك:
 /status
+معرفة حالة الاشتراك
 
-4) إيقاف التحديث:
-/stop`
+/stop
+إيقاف التحديث
+
+/redeem CODE
+تفعيل الاشتراك`
   );
 });
 
-bot.onText(/\/stop/, (msg) => {
-  clearUpdate(msg.chat.id);
-  bot.sendMessage(msg.chat.id, '🛑 تم إيقاف التحديثات.');
-});
+bot.onText(/\/stop/, async (msg) => {
 
-bot.onText(/\/change/, (msg) => {
   clearUpdate(msg.chat.id);
-  bot.sendMessage(msg.chat.id, '🔄 اكتب رمز شركة جديد.');
+
+  await bot.sendMessage(
+    msg.chat.id,
+    '🛑 تم إيقاف التحديثات.'
+  );
 });
 
 bot.on('message', async (msg) => {
+
   const text = msg.text;
 
   if (!text) return;
-  if (text.startsWith('/')) return;
 
-  const symbol = text.trim().toUpperCase();
+  if (text.startsWith('/')) {
+    return;
+  }
+
+  const symbol = text
+    .trim()
+    .toUpperCase();
+
   const valid = /^[A-Z]{1,5}$/.test(symbol);
 
   if (!valid) {
+
     await bot.sendMessage(
       msg.chat.id,
-`⚠️ الرمز غير معروف.
+`⚠️ الرمز غير صحيح.
 
-اكتب رمز شركة صحيح مثل:
+أمثلة صحيحة:
 
 TSLA
 AAPL
 NVDA
 AMD
-SPY
-QQQ`
+SPY`
     );
+
     return;
   }
 
   sendFlow(msg.chat.id, symbol);
 });
 
-console.log('ST Flow Stocks bot is running with Supabase subscriptions...');
+console.log(
+  'ST Flow Stocks bot running...'
+);
