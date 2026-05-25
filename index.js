@@ -75,6 +75,7 @@ function generateCode() {
 }
 
 async function createActivationCode(days = 30) {
+
   const code = generateCode();
   const expiresAt = addDaysIso(days);
 
@@ -96,6 +97,7 @@ async function createActivationCode(days = 30) {
 }
 
 async function getUserAccess(chatId) {
+
   const { data, error } = await supabase
     .from('users_access')
     .select('*')
@@ -110,6 +112,7 @@ async function getUserAccess(chatId) {
 }
 
 async function hasActiveAccess(chatId) {
+
   const user = await getUserAccess(chatId);
 
   if (!user) return false;
@@ -120,6 +123,7 @@ async function hasActiveAccess(chatId) {
 }
 
 async function requireAccess(chatId) {
+
   const access = await hasActiveAccess(chatId);
 
   if (access) return true;
@@ -140,6 +144,7 @@ async function requireAccess(chatId) {
 }
 
 async function redeemCode(chatId, code) {
+
   const cleanCode = String(code || '')
     .trim()
     .toUpperCase();
@@ -219,7 +224,12 @@ ${formatDate(expiresAt)}
 // =====================
 
 function fmt(n) {
-  if (n === undefined || n === null || isNaN(Number(n))) {
+
+  if (
+    n === undefined ||
+    n === null ||
+    isNaN(Number(n))
+  ) {
     return 'غير متوفر';
   }
 
@@ -227,7 +237,12 @@ function fmt(n) {
 }
 
 function fmtPrice(n) {
-  if (n === undefined || n === null || isNaN(Number(n))) {
+
+  if (
+    n === undefined ||
+    n === null ||
+    isNaN(Number(n))
+  ) {
     return 'غير متوفر';
   }
 
@@ -235,7 +250,12 @@ function fmtPrice(n) {
 }
 
 function fmtPercent(n) {
-  if (n === undefined || n === null || isNaN(Number(n))) {
+
+  if (
+    n === undefined ||
+    n === null ||
+    isNaN(Number(n))
+  ) {
     return 'غير متوفر';
   }
 
@@ -247,38 +267,60 @@ function nowSeconds() {
 }
 
 function canRequest(chatId) {
-  const last = userCooldown.get(chatId) || 0;
-  const diff = nowSeconds() - last;
+
+  const last =
+    userCooldown.get(chatId) || 0;
+
+  const diff =
+    nowSeconds() - last;
 
   if (diff < USER_COOLDOWN_SECONDS) {
+
     return {
       ok: false,
-      wait: USER_COOLDOWN_SECONDS - diff
+      wait:
+        USER_COOLDOWN_SECONDS - diff
     };
   }
 
-  userCooldown.set(chatId, nowSeconds());
+  userCooldown.set(
+    chatId,
+    nowSeconds()
+  );
+
   return { ok: true };
 }
 
 function getContractType(item) {
-  return String(item?.details?.contract_type || '').toLowerCase();
+  return String(
+    item?.details?.contract_type || ''
+  ).toLowerCase();
 }
 
 function getStrike(item) {
-  return item?.details?.strike_price || 'غير متوفر';
+  return (
+    item?.details?.strike_price ||
+    'غير متوفر'
+  );
 }
 
 function getVolume(item) {
-  return Number(item?.day?.volume || 0);
+  return Number(
+    item?.day?.volume || 0
+  );
 }
 
 function getOI(item) {
-  return Number(item?.open_interest || 0);
+  return Number(
+    item?.open_interest || 0
+  );
 }
 
 function getExpiration(item) {
-  return item?.details?.expiration_date || 'غير متوفر';
+  return (
+    item?.details?.expiration_date ||
+    'غير متوفر'
+  );
 }
 
 function getIV(item) {
@@ -298,9 +340,14 @@ function getTheta(item) {
 }
 
 function gammaText(gamma) {
+
   const g = Number(gamma);
 
-  if (gamma === undefined || gamma === null || isNaN(g)) {
+  if (
+    gamma === undefined ||
+    gamma === null ||
+    isNaN(g)
+  ) {
     return 'غير متوفر';
   }
 
@@ -311,13 +358,173 @@ function gammaText(gamma) {
   return 'منخفض';
 }
 
-function distancePercent(strike, stockPrice) {
+function distancePercent(
+  strike,
+  stockPrice
+) {
+
   const s = Number(strike);
   const p = Number(stockPrice);
 
-  if (!s || !p || isNaN(s) || isNaN(p)) return null;
+  if (
+    !s ||
+    !p ||
+    isNaN(s) ||
+    isNaN(p)
+  ) return null;
 
-  return Math.abs(((s - p) / p) * 100);
+  return Math.abs(
+    ((s - p) / p) * 100
+  );
+}
+
+function daysToExpiration(dateStr) {
+
+  if (!dateStr) return 999;
+
+  const now = new Date();
+
+  const exp =
+    new Date(dateStr);
+
+  return Math.ceil(
+    (exp - now) /
+    (1000 * 60 * 60 * 24)
+  );
+}
+
+function qualityScore(
+  item,
+  stockPrice
+) {
+
+  const volume =
+    getVolume(item);
+
+  const oi =
+    getOI(item);
+
+  const gamma =
+    Number(getGamma(item) || 0);
+
+  const delta =
+    Math.abs(
+      Number(getDelta(item) || 0)
+    );
+
+  const iv =
+    Number(getIV(item) || 0);
+
+  const distance =
+    distancePercent(
+      getStrike(item),
+      stockPrice
+    );
+
+  const dte =
+    daysToExpiration(
+      getExpiration(item)
+    );
+
+  let score = 0;
+
+  score += volume * 1.2;
+  score += oi * 0.4;
+
+  if (volume > oi) {
+    score += 5000;
+  }
+
+  if (gamma >= 0.04) {
+    score += 3000;
+  }
+
+  if (
+    delta >= 0.20 &&
+    delta <= 0.45
+  ) {
+    score += 2500;
+  }
+
+  if (
+    distance !== null &&
+    distance <= 2
+  ) {
+    score += 4000;
+  }
+
+  if (dte <= 7) {
+    score += 1500;
+  }
+
+  if (iv >= 0.40) {
+    score -= 1000;
+  }
+
+  return score;
+}
+
+function scoreContract(
+  item,
+  stockPrice
+) {
+  return qualityScore(
+    item,
+    stockPrice
+  );
+}
+
+async function apiGet(url) {
+
+  if (!API_KEY) {
+    throw new Error(
+      'Missing MASSIVE_API_KEY'
+    );
+  }
+
+  const res = await fetch(url);
+
+  const data =
+    await res.json();
+
+  if (!res.ok) {
+
+    throw new Error(
+      data?.error ||
+      data?.message ||
+      'API Error'
+    );
+  }
+
+  return data;
+}
+
+async function getStockSnapshot(symbol) {
+
+  const url =
+    `https://api.massive.com/v2/aggs/ticker/${symbol}/prev?adjusted=true&apiKey=${API_KEY}`;
+
+  const data =
+    await apiGet(url);
+
+  const r =
+    data?.results?.[0];
+
+  if (!r) return null;
+
+  const change =
+    r.o
+      ? ((r.c - r.o) / r.o) * 100
+      : null;
+
+  return {
+    price: r.c,
+    open: r.o,
+    high: r.h,
+    low: r.l,
+    volume: r.v,
+    change
+  };
 }
 function daysToExpiration(dateStr) {
   if (!dateStr) return 999;
