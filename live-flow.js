@@ -12,56 +12,101 @@ const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
   .map(x => x.trim())
   .filter(Boolean);
 
-const MIN_PREMIUM = 100000; // أقل قيمة صفقة: 100 ألف دولار
+// =====================
+// إعدادات الفلترة
+// =====================
+
+const MIN_PREMIUM = 150000; // أقل قيمة صفقة: 150 ألف دولار
+const MIN_SIZE = 100;       // أقل عدد عقود
+const MAX_SPREAD_PERCENT = 15;
+
 const ALERT_COOLDOWN_MS = 2 * 60 * 1000;
 
 const sentAlerts = new Map();
+
+// =====================
+// Helpers
+// =====================
 
 function fmt(n) {
   return Number(n || 0).toLocaleString('en-US');
 }
 
 function optionTypeFromSymbol(sym) {
-  if (String(sym).includes('C')) return 'CALL';
-  if (String(sym).includes('P')) return 'PUT';
+  const s = String(sym || '');
+
+  if (s.includes('C')) return 'كول / CALL';
+  if (s.includes('P')) return 'بوت / PUT';
+
   return 'غير معروف';
 }
 
 function canAlert(key) {
   const last = sentAlerts.get(key) || 0;
-  if (Date.now() - last < ALERT_COOLDOWN_MS) return false;
+
+  if (Date.now() - last < ALERT_COOLDOWN_MS) {
+    return false;
+  }
+
   sentAlerts.set(key, Date.now());
+
   return true;
 }
 
-function buildAlert(msg, premium) {
-  const side = optionTypeFromSymbol(msg.sym);
+function buildAlert(msg, premium, sideType, spreadPercent) {
+  const optionType = optionTypeFromSymbol(msg.sym);
 
-  return `🚨 تدفق خيارات مباشر
+  let strength = 'متوسطة';
+
+  if (premium >= 1000000) {
+    strength = 'مؤسسية قوية جدًا';
+  } else if (premium >= 500000) {
+    strength = 'قوية جدًا';
+  } else if (premium >= 250000) {
+    strength = 'قوية';
+  }
+
+  return `🚨 سيولة ذكية مباشرة
 
 📌 العقد:
 ${msg.sym}
 
 📈 النوع:
-${side}
+${optionType}
 
-💵 سعر التنفيذ:
-${msg.p}
+💰 سعر التنفيذ:
+$${Number(msg.p || 0).toFixed(2)}
 
-📦 الكمية:
+📦 حجم العقود:
 ${fmt(msg.s)}
 
-💰 قيمة الصفقة:
+💵 قيمة الصفقة:
 $${fmt(premium)}
+
+━━━━━━━━━━━━━━
+
+⚡ نوع التنفيذ:
+${sideType}
+
+📊 السبريد:
+${spreadPercent.toFixed(2)}%
+
+🔥 القوة:
+${strength}
 
 🕒 الوقت:
 ${new Date(msg.t).toLocaleString('ar-SA')}
 
 ━━━━━━━━━━━━━━
 
-🧠 القراءة:
-دخول Live Options Tape مباشر على عقد خيارات.`;
+🧠 القراءة الذكية:
+تم رصد تدفق مباشر على عقد خيارات بحجم كبير.
+يفضل مراقبة حركة السعر والتأكيد قبل الدخول.`;
 }
+
+// =====================
+// WebSocket Connection
+// =====================
 
 function connect() {
   const ws = new WebSocket(
@@ -83,17 +128,25 @@ function connect() {
 
       for (const msg of messages) {
         if (msg.ev === 'status') {
-          console.log(msg.message || JSON.stringify(msg));
+          console.log(
+            msg.message || JSON.stringify(msg)
+          );
+
+          const statusMessage =
+            String(msg.message || '').toLowerCase();
 
           if (
-            String(msg.message || '').toLowerCase().includes('auth')
+            statusMessage.includes('auth') ||
+            statusMessage.includes('success')
           ) {
             ws.send(JSON.stringify({
               action: 'subscribe',
               params: 'T.*'
             }));
 
-            console.log('📡 Subscribed To Live Options Trades');
+            console.log(
+              '📡 Subscribed To Live Options Trades'
+            );
           }
 
           continue;
@@ -103,37 +156,85 @@ function connect() {
 
         const price = Number(msg.p || 0);
         const size = Number(msg.s || 0);
-        const premium = price * size * 100;
+
+        const premium =
+          price * size * 100;
 
         if (premium < MIN_PREMIUM) continue;
+        if (size < MIN_SIZE) continue;
 
-        const key = `${msg.sym}_${Math.floor(Date.now() / ALERT_COOLDOWN_MS)}`;
+        const ask = Number(msg.ap || 0);
+        const bid = Number(msg.bp || 0);
 
-        if (!canAlert(key)) continue;
+        let spreadPercent = 0;
 
-        const alert = buildAlert(msg, premium);
+        if (ask > 0 && bid > 0) {
+          spreadPercent =
+            ((ask - bid) / ((ask + bid) / 2)) * 100;
 
-        for (const adminId of ADMIN_IDS) {
-          try {
-            await bot.sendMessage(adminId, alert);
-          } catch (err) {
-            console.error('Telegram Send Error:', err.message);
+          if (spreadPercent > MAX_SPREAD_PERCENT) {
+            continue;
           }
         }
 
-        console.log(`🚨 Alert Sent: ${msg.sym} $${fmt(premium)}`);
+        let sideType = '🟡 داخل السبريد / غير واضح';
+
+        if (ask > 0 && price >= ask) {
+          sideType = '🟢 شراء هجومي على الـ Ask';
+        } else if (bid > 0 && price <= bid) {
+          sideType = '🔴 بيع هجومي على الـ Bid';
+        }
+
+        const key =
+          `${msg.sym}_${Math.floor(Date.now() / ALERT_COOLDOWN_MS)}`;
+
+        if (!canAlert(key)) continue;
+
+        const alert =
+          buildAlert(
+            msg,
+            premium,
+            sideType,
+            spreadPercent
+          );
+
+        for (const adminId of ADMIN_IDS) {
+          try {
+            await bot.sendMessage(
+              adminId,
+              alert
+            );
+          } catch (err) {
+            console.error(
+              'Telegram Send Error:',
+              err.message
+            );
+          }
+        }
+
+        console.log(
+          `🚨 Alert Sent: ${msg.sym} $${fmt(premium)}`
+        );
       }
     } catch (err) {
-      console.error('Message Error:', err.message);
+      console.error(
+        'Message Error:',
+        err.message
+      );
     }
   });
 
   ws.on('error', (err) => {
-    console.error('❌ WS Error:', err.message);
+    console.error(
+      '❌ WS Error:',
+      err.message
+    );
   });
 
   ws.on('close', () => {
-    console.log('🔌 Connection Closed — Reconnecting in 5s');
+    console.log(
+      '🔌 Connection Closed — Reconnecting in 5s'
+    );
 
     setTimeout(() => {
       connect();
@@ -143,4 +244,6 @@ function connect() {
 
 connect();
 
-console.log('🚀 Live Options Tape Engine Started');
+console.log(
+  '🚀 Live Options Tape Engine Started'
+);
