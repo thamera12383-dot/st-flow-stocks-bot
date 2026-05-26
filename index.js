@@ -1537,9 +1537,6 @@ if (!adminOk) {
         new Date(user.expires_at).getTime() <= now
       );
 
-    const activeRadar =
-      activeRadarSessions.size;
-
     await bot.sendMessage(
       msg.chat.id,
 `📊 إحصائيات البوت
@@ -1554,9 +1551,6 @@ ${activeUsers.length}
 
 ❌ الاشتراكات المنتهية:
 ${expiredUsers.length}
-
-📡 جلسات السيولة النشطة:
-${activeRadar}
 
 ━━━━━━━━━━━━━━
 
