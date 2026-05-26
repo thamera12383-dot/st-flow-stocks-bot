@@ -4,10 +4,12 @@
   "description": "Telegram stock flow bot",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node live-flow.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
-    "node-telegram-bot-api": "^0.66.0"
+    "node-telegram-bot-api": "^0.66.0",
+    "axios": "^1.7.9",
+    "ws": "^8.18.0"
   }
 }
