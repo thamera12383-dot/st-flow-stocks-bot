@@ -27,8 +27,8 @@ const WATCHLIST = [
   'QQQ',
 ];
 
-const MIN_PREMIUM = 5000;
-const MIN_SIZE = 1;
+const MIN_PREMIUM = 25000;
+const MIN_SIZE = 20;
 const MAX_SPREAD_PERCENT = 15;
 const ALERT_COOLDOWN_MS = 2 * 60 * 1000;
 
