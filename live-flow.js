@@ -3,7 +3,7 @@ const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, {
-  polling: false
+  polling: true
 });
 
 const API_KEY = process.env.MASSIVE_API_KEY;
@@ -305,3 +305,189 @@ function connect() {
 connect();
 
 console.log('🚀 Smart Flow Engine Running');
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function addDaysIso(days) {
+  const d = new Date();
+  d.setDate(d.getDate() + Number(days));
+  return d.toISOString();
+}
+
+function formatDate(v) {
+  if (!v) return 'غير متوفر';
+
+  return new Date(v).toLocaleString('ar-SA', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function isAdmin(chatId) {
+  return ADMIN_IDS.includes(String(chatId));
+}
+
+function generateCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = 'ST-';
+
+  for (let i = 0; i < 4; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+
+  code += '-';
+
+  for (let i = 0; i < 4; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+
+  return code;
+}
+
+async function createActivationCode(days = 30) {
+  const code = generateCode();
+  const expiresAt = addDaysIso(days);
+
+  const { error } = await supabase
+    .from('activation_codes')
+    .insert({
+      code,
+      used: false,
+      expires_at: expiresAt
+    });
+
+  if (error) throw error;
+
+  return { code, days, expiresAt };
+}
+
+async function redeemCode(chatId, code) {
+  const cleanCode = String(code || '').trim().toUpperCase();
+
+  const { data: activation, error } = await supabase
+    .from('activation_codes')
+    .select('*')
+    .eq('code', cleanCode)
+    .single();
+
+  if (error || !activation) {
+    return '❌ كود التفعيل غير صحيح.';
+  }
+
+  if (activation.used) {
+    return '⚠️ هذا الكود مستخدم مسبقًا.';
+  }
+
+  if (!activation.expires_at || new Date(activation.expires_at).getTime() < Date.now()) {
+    return '⚠️ هذا الكود منتهي الصلاحية.';
+  }
+
+  await supabase
+    .from('activation_codes')
+    .update({
+      used: true,
+      telegram_id: String(chatId),
+      activated_at: nowIso()
+    })
+    .eq('code', cleanCode);
+
+  await supabase
+    .from('users_access')
+    .upsert(
+      {
+        telegram_id: String(chatId),
+        code_used: cleanCode,
+        expires_at: activation.expires_at,
+        active: true,
+        notified_3_days: false
+      },
+      { onConflict: 'telegram_id' }
+    );
+
+  return `✅ تم تفعيل اشتراكك بنجاح.
+
+📅 ينتهي الاشتراك:
+${formatDate(activation.expires_at)}`;
+}
+
+bot.onText(/\/start/, async (msg) => {
+  await bot.sendMessage(
+    msg.chat.id,
+`🚀 مرحبًا بك في بوت سيولة الشركات
+
+البوت يعمل الآن بمحرك Live Flow مباشر.
+
+لتفعيل اشتراكك:
+/redeem CODE`
+  );
+});
+
+bot.onText(/\/myid/, async (msg) => {
+  await bot.sendMessage(
+    msg.chat.id,
+    `🆔 ID:\n${msg.chat.id}`
+  );
+});
+
+bot.onText(/\/gencode(?:\s+(\d+))?/, async (msg, match) => {
+  if (!isAdmin(msg.chat.id)) {
+    return bot.sendMessage(msg.chat.id, '⛔ للأدمن فقط');
+  }
+
+  const days = Number(match[1] || 30);
+  const result = await createActivationCode(days);
+
+  await bot.sendMessage(
+    msg.chat.id,
+`✅ كود جديد:
+
+${result.code}
+
+⏳ المدة:
+${days} يوم
+
+📅 الصلاحية:
+${formatDate(result.expiresAt)}`
+  );
+});
+
+bot.onText(/\/redeem (.+)/, async (msg, match) => {
+  try {
+    const result = await redeemCode(msg.chat.id, match[1]);
+    await bot.sendMessage(msg.chat.id, result);
+  } catch (err) {
+    await bot.sendMessage(
+      msg.chat.id,
+      `⚠️ حدث خطأ:\n${err.message}`
+    );
+  }
+});
+
+bot.onText(/\/status/, async (msg) => {
+  const { data: user } = await supabase
+    .from('users_access')
+    .select('*')
+    .eq('telegram_id', String(msg.chat.id))
+    .single();
+
+  if (!user) {
+    return bot.sendMessage(msg.chat.id, '🔒 لا يوجد اشتراك فعال');
+  }
+
+  const active =
+    user.active &&
+    user.expires_at &&
+    new Date(user.expires_at).getTime() > Date.now();
+
+  await bot.sendMessage(
+    msg.chat.id,
+`${active ? '✅ اشتراكك فعال' : '❌ اشتراكك منتهي'}
+
+📅 ينتهي:
+${formatDate(user.expires_at)}`
+  );
+});
