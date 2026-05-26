@@ -690,3 +690,35 @@ SPY`
   }
 
 });
+
+process.on('SIGTERM', async () => {
+
+  console.log('🛑 إيقاف البوت قبل إعادة التشغيل');
+
+  try {
+    await bot.stopPolling();
+  } catch (err) {}
+
+  try {
+    if (ws) ws.close();
+  } catch (err) {}
+
+  process.exit(0);
+
+});
+
+process.on('SIGINT', async () => {
+
+  console.log('🛑 إيقاف يدوي للبوت');
+
+  try {
+    await bot.stopPolling();
+  } catch (err) {}
+
+  try {
+    if (ws) ws.close();
+  } catch (err) {}
+
+  process.exit(0);
+
+});
