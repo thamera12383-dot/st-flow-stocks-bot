@@ -377,28 +377,40 @@ async function apiGet(url) {
 }
 
 async function getStockSnapshot(symbol) {
-  const url =
-  `https://api.massive.com/v2/aggs/ticker/${symbol}...`;
+  const liveUrl =
+    `https://api.massive.com/v2/last/trade/${symbol}?apiKey=${API_KEY}`;
 
-const data = await apiGet(url);
+  const prevUrl =
+    `https://api.massive.com/v2/aggs/ticker/${symbol}/prev?adjusted=true&apiKey=${API_KEY}`;
 
-const r = data?.results?.[0];
+  const liveData = await apiGet(liveUrl);
+  const prevData = await apiGet(prevUrl);
 
-if (!r) return null;
+  const livePrice =
+    liveData?.results?.p ||
+    liveData?.last?.price ||
+    null;
 
-const change =
-  r.o
-    ? ((r.c - r.o) / r.o) * 100
-    : null;
+  const r = prevData?.results?.[0];
 
-return {
-  price: r.c,
-  open: r.o,
-  high: r.h,
-  low: r.l,
-  volume: r.v,
-  change
-};
+  if (!r && !livePrice) return null;
+
+  const price = livePrice || r.c;
+
+  const change =
+    r?.c
+      ? ((price - r.c) / r.c) * 100
+      : null;
+
+  return {
+    symbol,
+    price,
+    open: r?.o || null,
+    high: r?.h || null,
+    low: r?.l || null,
+    volume: r?.v || 0,
+    change
+  };
 }
 
 async function getOptionsChain(symbol) {
