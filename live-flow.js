@@ -25,14 +25,10 @@ const ADMIN_IDS = String(process.env.ADMIN_IDS || '')
 const WATCHLIST = [
   'SPY',
   'QQQ',
-  'NVDA',
-  'TSLA',
-  'AAPL',
-  'META'
 ];
 
-const MIN_PREMIUM = 500000;
-const MIN_SIZE = 20;
+const MIN_PREMIUM = 5000;
+const MIN_SIZE = 1;
 const MAX_SPREAD_PERCENT = 15;
 const ALERT_COOLDOWN_MS = 2 * 60 * 1000;
 
