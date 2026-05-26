@@ -19,19 +19,6 @@ const CACHE = new Map();
 const activeUpdates = new Map();
 const sentFlowAlerts = new Map();
 
-const DEFAULT_WATCHLIST = [
-  'SPY',
-  'QQQ',
-  'TSLA',
-  'NVDA',
-  'AAPL',
-  'META',
-  'AMZN',
-  'MSFT',
-  'PLTR',
-  'AMD'
-];
-
 const watchlist = new Set(
   String(process.env.FLOW_WATCHLIST || DEFAULT_WATCHLIST.join(','))
     .split(',')
