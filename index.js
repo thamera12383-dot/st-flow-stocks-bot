@@ -17,11 +17,43 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const userCooldown = new Map();
 const CACHE = new Map();
 const activeUpdates = new Map();
+const sentFlowAlerts = new Map();
+
+const DEFAULT_WATCHLIST = [
+  'SPY',
+  'QQQ',
+  'TSLA',
+  'NVDA',
+  'AAPL',
+  'META',
+  'AMZN',
+  'MSFT',
+  'PLTR',
+  'AMD'
+];
+
+const watchlist = new Set(
+  String(process.env.FLOW_WATCHLIST || DEFAULT_WATCHLIST.join(','))
+    .split(',')
+    .map(x => x.trim().toUpperCase())
+    .filter(Boolean)
+);
 
 const USER_COOLDOWN_SECONDS = 10;
 const CACHE_SECONDS = 60;
 const UPDATE_INTERVAL_MS = 60 * 1000;
 const UPDATE_DURATION_MS = 5 * 60 * 1000;
+
+const SCANNER_INTERVAL_MS = 60 * 1000;
+const FLOW_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
+
+const MIN_ALERT_VOLUME = 3000;
+const MIN_ALERT_VOLUME_OI_RATIO = 3;
+const MIN_ALERT_GAMMA = 0.04;
+const MAX_ALERT_DISTANCE_PERCENT = 2;
+const MIN_ALERT_DELTA = 0.20;
+const MAX_ALERT_DELTA = 0.55;
+const MAX_ALERT_SPREAD_PERCENT = 20;
 
 const EXPIRY_WARNING_DAYS = 3;
 const CHECK_EXPIRY_INTERVAL = 12 * 60 * 60 * 1000;
@@ -137,17 +169,26 @@ async function redeemCode(chatId, code) {
     .single();
 
   if (error || !activation) {
-    return { ok: false, message: '❌ كود التفعيل غير صحيح.' };
+    return {
+      ok: false,
+      message: '❌ كود التفعيل غير صحيح.'
+    };
   }
 
   if (activation.used) {
-    return { ok: false, message: '⚠️ هذا الكود مستخدم مسبقًا.' };
+    return {
+      ok: false,
+      message: '⚠️ هذا الكود مستخدم مسبقًا.'
+    };
   }
 
   const expiresAt = activation.expires_at;
 
   if (!expiresAt || new Date(expiresAt).getTime() < Date.now()) {
-    return { ok: false, message: '⚠️ هذا الكود منتهي الصلاحية.' };
+    return {
+      ok: false,
+      message: '⚠️ هذا الكود منتهي الصلاحية.'
+    };
   }
 
   const { error: updateError } = await supabase
@@ -182,25 +223,34 @@ async function redeemCode(chatId, code) {
     message:
 `✅ تم تفعيل اشتراكك بنجاح.
 
-ينتهي في:
+📅 ينتهي الاشتراك:
 ${formatDate(expiresAt)}
 
-يمكنك الآن استخدام البوت.`
+🚀 يمكنك الآن استخدام البوت.`
   };
 }
 
 function fmt(n) {
-  if (n === undefined || n === null || isNaN(Number(n))) return 'غير متوفر';
+  if (n === undefined || n === null || isNaN(Number(n))) {
+    return 'غير متوفر';
+  }
+
   return Number(n).toLocaleString('en-US');
 }
 
 function fmtPrice(n) {
-  if (n === undefined || n === null || isNaN(Number(n))) return 'غير متوفر';
+  if (n === undefined || n === null || isNaN(Number(n))) {
+    return 'غير متوفر';
+  }
+
   return Number(n).toFixed(2);
 }
 
 function fmtPercent(n) {
-  if (n === undefined || n === null || isNaN(Number(n))) return 'غير متوفر';
+  if (n === undefined || n === null || isNaN(Number(n))) {
+    return 'غير متوفر';
+  }
+
   return `${Number(n).toFixed(2)}%`;
 }
 
@@ -213,15 +263,21 @@ function canRequest(chatId) {
   const diff = nowSeconds() - last;
 
   if (diff < USER_COOLDOWN_SECONDS) {
-    return { ok: false, wait: USER_COOLDOWN_SECONDS - diff };
+    return {
+      ok: false,
+      wait: USER_COOLDOWN_SECONDS - diff
+    };
   }
 
   userCooldown.set(chatId, nowSeconds());
+
   return { ok: true };
 }
 
 function getContractType(item) {
-  return String(item?.details?.contract_type || '').toUpperCase();
+  return String(
+    item?.details?.contract_type || ''
+  ).toUpperCase();
 }
 
 function getStrike(item) {
@@ -268,15 +324,23 @@ function getMidPrice(item) {
   const bid = getBid(item);
   const ask = getAsk(item);
 
-  if (bid > 0 && ask > 0) return (bid + ask) / 2;
+  if (bid > 0 && ask > 0) {
+    return (bid + ask) / 2;
+  }
 
-  return Number(item?.day?.close || item?.last_trade?.price || 0);
+  return Number(
+    item?.day?.close ||
+    item?.last_trade?.price ||
+    0
+  );
 }
-
 function gammaText(gamma) {
   const g = Number(gamma);
 
-  if (gamma === undefined || gamma === null || isNaN(g)) return 'غير متوفر';
+  if (gamma === undefined || gamma === null || isNaN(g)) {
+    return 'غير متوفر';
+  }
+
   if (g >= 0.08) return 'مرتفع جدًا';
   if (g >= 0.04) return 'مرتفع';
   if (g >= 0.02) return 'متوسط';
@@ -288,7 +352,9 @@ function distancePercent(strike, stockPrice) {
   const s = Number(strike);
   const p = Number(stockPrice);
 
-  if (!s || !p || isNaN(s) || isNaN(p)) return null;
+  if (!s || !p || isNaN(s) || isNaN(p)) {
+    return null;
+  }
 
   return Math.abs(((s - p) / p) * 100);
 }
@@ -299,16 +365,25 @@ function daysToExpiration(dateStr) {
   const now = new Date();
   const exp = new Date(dateStr);
 
-  return Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
+  return Math.ceil(
+    (exp - now) / (1000 * 60 * 60 * 24)
+  );
 }
+
 async function apiGet(url) {
-  if (!API_KEY) throw new Error('Missing MASSIVE_API_KEY');
+  if (!API_KEY) {
+    throw new Error('Missing MASSIVE_API_KEY');
+  }
 
   const res = await fetch(url);
   const data = await res.json();
 
   if (!res.ok) {
-    throw new Error(data?.error || data?.message || 'API Error');
+    throw new Error(
+      data?.error ||
+      data?.message ||
+      'API Error'
+    );
   }
 
   return data;
@@ -319,11 +394,15 @@ async function getStockSnapshot(symbol) {
     `https://api.massive.com/v2/aggs/ticker/${symbol}/prev?adjusted=true&apiKey=${API_KEY}`;
 
   const data = await apiGet(url);
+
   const r = data?.results?.[0];
 
   if (!r) return null;
 
-  const change = r.o ? ((r.c - r.o) / r.o) * 100 : null;
+  const change =
+    r.o
+      ? ((r.c - r.o) / r.o) * 100
+      : null;
 
   return {
     price: r.c,
@@ -340,17 +419,35 @@ async function getOptionsChain(symbol) {
     `https://api.massive.com/v3/snapshot/options/${symbol}?limit=250&apiKey=${API_KEY}`;
 
   const data = await apiGet(url);
+
   return data.results || [];
 }
 
 function qualityScore(item, stockPrice) {
   const volume = getVolume(item);
   const oi = getOI(item);
-  const gamma = Number(getGamma(item) || 0);
-  const delta = Math.abs(Number(getDelta(item) || 0));
-  const iv = Number(getIV(item) || 0);
-  const distance = distancePercent(getStrike(item), stockPrice);
-  const dte = daysToExpiration(getExpiration(item));
+
+  const gamma = Number(
+    getGamma(item) || 0
+  );
+
+  const delta = Math.abs(
+    Number(getDelta(item) || 0)
+  );
+
+  const iv = Number(
+    getIV(item) || 0
+  );
+
+  const distance = distancePercent(
+    getStrike(item),
+    stockPrice
+  );
+
+  const dte = daysToExpiration(
+    getExpiration(item)
+  );
+
   const bid = getBid(item);
   const ask = getAsk(item);
   const mid = getMidPrice(item);
@@ -360,42 +457,399 @@ function qualityScore(item, stockPrice) {
   score += volume * 1.2;
   score += oi * 0.35;
 
-  if (volume > oi) score += 6000;
-  else if (volume > oi * 0.7) score += 3000;
+  if (volume > oi) {
+    score += 6000;
+  } else if (volume > oi * 0.7) {
+    score += 3000;
+  }
 
   if (distance !== null) {
-    if (distance <= 0.5) score += 6000;
-    else if (distance <= 1) score += 4500;
-    else if (distance <= 2) score += 2500;
-    else if (distance <= 3) score += 1000;
+    if (distance <= 0.5) {
+      score += 6000;
+    } else if (distance <= 1) {
+      score += 4500;
+    } else if (distance <= 2) {
+      score += 2500;
+    } else if (distance <= 3) {
+      score += 1000;
+    }
   }
 
-  if (gamma >= 0.08) score += 5000;
-  else if (gamma >= 0.04) score += 3000;
-  else if (gamma >= 0.02) score += 1200;
+  if (gamma >= 0.08) {
+    score += 5000;
+  } else if (gamma >= 0.04) {
+    score += 3000;
+  } else if (gamma >= 0.02) {
+    score += 1200;
+  }
 
-  if (delta >= 0.25 && delta <= 0.45) score += 3000;
-  else if (delta > 0.45 && delta <= 0.65) score += 1200;
+  if (delta >= 0.25 && delta <= 0.45) {
+    score += 3000;
+  } else if (delta > 0.45 && delta <= 0.65) {
+    score += 1200;
+  }
 
-  if (dte >= 0 && dte <= 7) score += 2000;
-  else if (dte <= 14) score += 800;
+  if (dte >= 0 && dte <= 7) {
+    score += 2000;
+  } else if (dte <= 14) {
+    score += 800;
+  }
 
-  if (mid >= 1.5 && mid <= 2.5) score += 3000;
+  if (mid >= 1.5 && mid <= 2.5) {
+    score += 3000;
+  }
 
   if (bid > 0 && ask > 0 && mid > 0) {
-    const spreadPercent = ((ask - bid) / mid) * 100;
+    const spreadPercent =
+      ((ask - bid) / mid) * 100;
 
-    if (spreadPercent <= 8) score += 1500;
-    else if (spreadPercent <= 15) score += 700;
-    else score -= 1000;
+    if (spreadPercent <= 8) {
+      score += 1500;
+    } else if (spreadPercent <= 15) {
+      score += 700;
+    } else {
+      score -= 1000;
+    }
   }
 
-  if (iv >= 0.9) score -= 2500;
-  else if (iv >= 0.6) score -= 1000;
+  if (iv >= 0.9) {
+    score -= 2500;
+  } else if (iv >= 0.6) {
+    score -= 1000;
+  }
 
   return Math.round(score);
 }
 
+function isStrongFlowCandidate(item, stockPrice) {
+  const volume = getVolume(item);
+  const oi = getOI(item);
+
+  const gamma = Number(
+    getGamma(item) || 0
+  );
+
+  const delta = Math.abs(
+    Number(getDelta(item) || 0)
+  );
+
+  const strike = getStrike(item);
+
+  const distance = distancePercent(
+    strike,
+    stockPrice
+  );
+
+  const bid = getBid(item);
+  const ask = getAsk(item);
+  const mid = getMidPrice(item);
+
+  if (!volume || !oi) return false;
+
+  if (volume < MIN_ALERT_VOLUME) {
+    return false;
+  }
+
+  if (
+    volume < oi * MIN_ALERT_VOLUME_OI_RATIO
+  ) {
+    return false;
+  }
+
+  if (gamma < MIN_ALERT_GAMMA) {
+    return false;
+  }
+
+  if (
+    distance === null ||
+    distance > MAX_ALERT_DISTANCE_PERCENT
+  ) {
+    return false;
+  }
+
+  if (
+    delta < MIN_ALERT_DELTA ||
+    delta > MAX_ALERT_DELTA
+  ) {
+    return false;
+  }
+
+  if (mid <= 0) {
+    return false;
+  }
+
+  if (bid > 0 && ask > 0) {
+    const spreadPercent =
+      ((ask - bid) / mid) * 100;
+
+    if (
+      spreadPercent >
+      MAX_ALERT_SPREAD_PERCENT
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+function buildQuickFlowAlert(symbol, item, stockPrice) {
+  const side = getContractType(item);
+  const strike = getStrike(item);
+
+  const volume = getVolume(item);
+  const oi = getOI(item);
+
+  const gamma = Number(
+    getGamma(item) || 0
+  );
+
+  const delta = Number(
+    getDelta(item) || 0
+  );
+
+  const expiry = getExpiration(item);
+
+  const mid = getMidPrice(item);
+
+  const ratio =
+    oi > 0
+      ? (volume / oi).toFixed(1)
+      : '0';
+
+  return `🚨 تدفق سيولة قوي
+
+📊 السهم:
+${symbol}
+
+📈 النوع:
+${side}
+
+🎯 السترايك:
+${strike}
+
+📅 الانتهاء:
+${expiry}
+
+━━━━━━━━━━━━━━
+
+📦 الحجم:
+${fmt(volume)}
+
+📂 العقود المفتوحة:
+${fmt(oi)}
+
+🔥 نسبة Volume/OI:
+${ratio}x
+
+⚡ Gamma:
+${gammaText(gamma)}
+
+Δ Delta:
+${delta ? delta.toFixed(2) : 'غير متوفر'}
+
+💵 سعر العقد:
+${mid > 0 ? '$' + mid.toFixed(2) : 'غير متوفر'}
+
+━━━━━━━━━━━━━━
+
+🧠 القراءة:
+دخول سيولة غير معتاد على عقد قريب من السعر.`;
+}
+
+function flowAlertKey(symbol, item) {
+  return [
+    symbol,
+    getContractType(item),
+    getStrike(item),
+    getExpiration(item)
+  ].join('_');
+}
+
+function canSendFlowAlert(symbol, item) {
+  const key = flowAlertKey(symbol, item);
+
+  const last =
+    sentFlowAlerts.get(key) || 0;
+
+  const diff =
+    Date.now() - last;
+
+  if (diff < FLOW_ALERT_COOLDOWN_MS) {
+    return false;
+  }
+
+  sentFlowAlerts.set(
+    key,
+    Date.now()
+  );
+
+  return true;
+}
+
+async function scanMarketFlows() {
+  try {
+    const symbols = [...watchlist];
+
+    for (const symbol of symbols) {
+      try {
+        const stock =
+          await getStockSnapshot(symbol);
+
+        if (!stock?.price) continue;
+
+        const chain =
+          await getOptionsChain(symbol);
+
+        if (!chain?.length) continue;
+
+        const strongContracts =
+          chain
+            .filter(item =>
+              isStrongFlowCandidate(
+                item,
+                stock.price
+              )
+            )
+            .map(item => ({
+              item,
+              score: qualityScore(
+                item,
+                stock.price
+              )
+            }))
+            .sort(
+              (a, b) =>
+                b.score - a.score
+            )
+            .slice(0, 1);
+
+        if (!strongContracts.length) {
+          continue;
+        }
+
+        const best =
+          strongContracts[0].item;
+
+        const canSend =
+          canSendFlowAlert(
+            symbol,
+            best
+          );
+
+        if (!canSend) {
+          continue;
+        }
+
+        const alert =
+          buildQuickFlowAlert(
+            symbol,
+            best,
+            stock.price
+          );
+
+        for (const adminId of ADMIN_IDS) {
+          try {
+            await bot.sendMessage(
+              adminId,
+              alert
+            );
+          } catch (err) {
+            console.error(
+              'Alert Send Error:',
+              err.message
+            );
+          }
+        }
+      } catch (err) {
+        console.error(
+          `Scanner Error ${symbol}:`,
+          err.message
+        );
+      }
+    }
+  } catch (err) {
+    console.error(
+      'scanMarketFlows Error:',
+      err.message
+    );
+  }
+}
+
+setInterval(() => {
+  scanMarketFlows();
+}, SCANNER_INTERVAL_MS);
+
+bot.onText(
+  /\/addwatch\s+([A-Za-z]{1,10})/,
+  async (msg, match) => {
+
+    if (!isAdmin(msg.chat.id)) {
+      return bot.sendMessage(
+        msg.chat.id,
+        '⛔ هذا الأمر للمالك فقط.'
+      );
+    }
+
+    const symbol =
+      match[1].toUpperCase();
+
+    watchlist.add(symbol);
+
+    await bot.sendMessage(
+      msg.chat.id,
+      `✅ تم إضافة ${symbol} لقائمة الفحص التلقائي.`
+    );
+  }
+);
+
+bot.onText(
+  /\/removewatch\s+([A-Za-z]{1,10})/,
+  async (msg, match) => {
+
+    if (!isAdmin(msg.chat.id)) {
+      return bot.sendMessage(
+        msg.chat.id,
+        '⛔ هذا الأمر للمالك فقط.'
+      );
+    }
+
+    const symbol =
+      match[1].toUpperCase();
+
+    watchlist.delete(symbol);
+
+    await bot.sendMessage(
+      msg.chat.id,
+      `🗑 تم حذف ${symbol} من قائمة الفحص التلقائي.`
+    );
+  }
+);
+
+bot.onText(
+  /\/watchlist/,
+  async (msg) => {
+
+    if (!isAdmin(msg.chat.id)) {
+      return bot.sendMessage(
+        msg.chat.id,
+        '⛔ هذا الأمر للمالك فقط.'
+      );
+    }
+
+    const list = [...watchlist];
+
+    await bot.sendMessage(
+      msg.chat.id,
+      list.length
+        ? `📋 قائمة الفحص التلقائي:\n\n${list.join('\n')}`
+        : '⚠️ قائمة الفحص التلقائي فارغة.'
+    );
+  }
+);
+
+console.log(
+  '🚀 Smart Liquidity Scanner Running...'
+);
 function topContracts(chain, type, stockPrice, count = 3) {
   return chain
     .filter(x => {
@@ -432,12 +886,23 @@ function topGammaContracts(chain, stockPrice, count = 3) {
 }
 
 function nearestSupportResistance(stock) {
-  if (!stock) return { support: 'غير متوفر', resistance: 'غير متوفر' };
-  return { support: stock.low, resistance: stock.high };
+  if (!stock) {
+    return {
+      support: 'غير متوفر',
+      resistance: 'غير متوفر'
+    };
+  }
+
+  return {
+    support: stock.low,
+    resistance: stock.high
+  };
 }
 
 function momentumText(stock) {
-  if (!stock || stock.change === null || stock.change === undefined) return 'غير متوفر';
+  if (!stock || stock.change === null || stock.change === undefined) {
+    return 'غير متوفر';
+  }
 
   if (stock.change > 1) return '🔥 صاعد قوي';
   if (stock.change > 0) return '🟢 صاعد';
@@ -448,21 +913,34 @@ function momentumText(stock) {
 }
 
 function momentumSide(stock) {
-  if (!stock || stock.change === null || stock.change === undefined) return 'NEUTRAL';
+  if (!stock || stock.change === null || stock.change === undefined) {
+    return 'NEUTRAL';
+  }
+
   if (stock.change > 0) return 'CALL';
   if (stock.change < 0) return 'PUT';
+
   return 'NEUTRAL';
 }
 
 function getStrongestContract(calls, puts, stockPrice) {
   const all = [
-    ...calls.map(x => ({ item: x, side: 'CALL', qScore: qualityScore(x, stockPrice) })),
-    ...puts.map(x => ({ item: x, side: 'PUT', qScore: qualityScore(x, stockPrice) }))
+    ...calls.map(x => ({
+      item: x,
+      side: 'CALL',
+      qScore: qualityScore(x, stockPrice)
+    })),
+    ...puts.map(x => ({
+      item: x,
+      side: 'PUT',
+      qScore: qualityScore(x, stockPrice)
+    }))
   ];
 
   if (!all.length) return null;
 
   all.sort((a, b) => b.qScore - a.qScore);
+
   return all[0];
 }
 
@@ -475,12 +953,12 @@ function biasText(calls, puts, stockPrice, stock) {
   const mSide = momentumSide(stock);
 
   if (totalCall > totalPut * 1.25) {
-    if (mSide === 'PUT') return '🟡 تدفق CALL عكسي يحتاج تأكيد';
+    if (mSide === 'PUT') return '🟡 تدفق كول عكسي يحتاج تأكيد';
     return '🟢 تدفق شرائي قوي';
   }
 
   if (totalPut > totalCall * 1.25) {
-    if (mSide === 'CALL') return '🟡 تدفق PUT عكسي يحتاج تأكيد';
+    if (mSide === 'CALL') return '🟡 تدفق بوت عكسي يحتاج تأكيد';
     return '🔴 تدفق بيعي قوي';
   }
 
@@ -514,7 +992,10 @@ async function buildFlowMessage(symbol) {
   }
 
   const stock = await getStockSnapshot(symbol);
-  if (!stock) return `⚠️ تعذر جلب بيانات ${symbol}`;
+
+  if (!stock) {
+    return `⚠️ تعذر جلب بيانات ${symbol}`;
+  }
 
   const chain = await getOptionsChain(symbol);
 
@@ -537,7 +1018,11 @@ ${fmtPrice(stock.price)}
 
 يرجى المحاولة لاحقاً.`;
 
-    CACHE.set(symbol, { time: nowSeconds(), message: msg });
+    CACHE.set(symbol, {
+      time: nowSeconds(),
+      message: msg
+    });
+
     return msg;
   }
 
@@ -556,15 +1041,22 @@ ${fmtPrice(stock.price)}
   const midPrice = getMidPrice(item);
 
   let quality = 'متوسطة';
-  if (qScore >= 65000) quality = 'قوية جدًا';
-  else if (qScore >= 40000) quality = 'قوية';
-  else if (qScore >= 22000) quality = 'جيدة';
+
+  if (qScore >= 65000) {
+    quality = 'قوية جدًا';
+  } else if (qScore >= 40000) {
+    quality = 'قوية';
+  } else if (qScore >= 22000) {
+    quality = 'جيدة';
+  }
 
   const gammaSection =
     gammaLeaders.length
-      ? gammaLeaders.map((x, i) => {
-          return `${i + 1}) ${getContractType(x)} ${getStrike(x)} — Γ ${Number(getGamma(x) || 0).toFixed(2)}`;
-        }).join('\n')
+      ? gammaLeaders
+          .map((x, i) => {
+            return `${i + 1}) ${getContractType(x)} ${getStrike(x)} — Γ ${Number(getGamma(x) || 0).toFixed(2)}`;
+          })
+          .join('\n')
       : 'لا توجد بيانات Gamma';
 
   let smartRead = '';
@@ -669,15 +1161,24 @@ ${fmtPrice(sr.resistance)}
 
 ⏱ تحديث كل 60 ثانية`;
 
-  CACHE.set(symbol, { time: nowSeconds(), message });
+  CACHE.set(symbol, {
+    time: nowSeconds(),
+    message
+  });
+
   return message;
 }
-
 async function checkExpiringSubscriptions() {
   try {
     const now = new Date();
+
     const warningDate = new Date(
-      now.getTime() + EXPIRY_WARNING_DAYS * 24 * 60 * 60 * 1000
+      now.getTime() +
+      EXPIRY_WARNING_DAYS *
+      24 *
+      60 *
+      60 *
+      1000
     );
 
     const { data: users, error } = await supabase
@@ -709,20 +1210,30 @@ ${formatDate(user.expires_at)}
 
         await supabase
           .from('users_access')
-          .update({ notified_3_days: true })
+          .update({
+            notified_3_days: true
+          })
           .eq('telegram_id', user.telegram_id);
       }
     }
   } catch (err) {
-    console.error('Expiry Check Error:', err.message);
+    console.error(
+      'Expiry Check Error:',
+      err.message
+    );
   }
 }
 
 function clearUpdate(chatId) {
   const active = activeUpdates.get(chatId);
 
-  if (active?.intervalId) clearInterval(active.intervalId);
-  if (active?.timeoutId) clearTimeout(active.timeoutId);
+  if (active?.intervalId) {
+    clearInterval(active.intervalId);
+  }
+
+  if (active?.timeoutId) {
+    clearTimeout(active.timeoutId);
+  }
 
   activeUpdates.delete(chatId);
 }
@@ -733,46 +1244,78 @@ function startAutoUpdate(chatId, symbol) {
   const intervalId = setInterval(async () => {
     try {
       const msg = await buildFlowMessage(symbol);
-      await bot.sendMessage(chatId, msg);
+
+      await bot.sendMessage(
+        chatId,
+        msg
+      );
     } catch (err) {
       console.error(err);
-      await bot.sendMessage(chatId, `⚠️ تعذر تحديث ${symbol}`);
+
+      await bot.sendMessage(
+        chatId,
+        `⚠️ تعذر تحديث ${symbol}`
+      );
+
       clearUpdate(chatId);
     }
   }, UPDATE_INTERVAL_MS);
 
   const timeoutId = setTimeout(async () => {
     clearUpdate(chatId);
-    await bot.sendMessage(chatId, `✅ انتهت متابعة ${symbol}`);
+
+    await bot.sendMessage(
+      chatId,
+      `✅ انتهت متابعة ${symbol}`
+    );
   }, UPDATE_DURATION_MS);
 
-  activeUpdates.set(chatId, { symbol, intervalId, timeoutId });
+  activeUpdates.set(chatId, {
+    symbol,
+    intervalId,
+    timeoutId
+  });
 }
 
 async function sendFlow(chatId, symbol) {
   try {
     const access = await requireAccess(chatId);
+
     if (!access) return;
 
     const check = canRequest(chatId);
 
     if (!check.ok) {
-      await bot.sendMessage(chatId, `⏳ انتظر ${check.wait} ثواني`);
+      await bot.sendMessage(
+        chatId,
+        `⏳ انتظر ${check.wait} ثواني`
+      );
+
       return;
     }
 
-    await bot.sendMessage(chatId, `⏳ جاري تحليل ${symbol}...`);
+    await bot.sendMessage(
+      chatId,
+      `⏳ جاري تحليل ${symbol}...`
+    );
 
     const msg = await buildFlowMessage(symbol);
-    await bot.sendMessage(chatId, msg);
+
+    await bot.sendMessage(
+      chatId,
+      msg
+    );
 
     startAutoUpdate(chatId, symbol);
   } catch (err) {
     console.error(err);
-    await bot.sendMessage(chatId, `حدث خطأ:\n${err.message}`);
+
+    await bot.sendMessage(
+      chatId,
+      `حدث خطأ:\n${err.message}`
+    );
   }
 }
-
 bot.onText(/\/start/, async (msg) => {
   await bot.sendMessage(
     msg.chat.id,
@@ -788,15 +1331,28 @@ SPY`
 });
 
 bot.onText(/\/myid/, async (msg) => {
-  await bot.sendMessage(msg.chat.id, `🆔 ID:\n${msg.chat.id}`);
+  await bot.sendMessage(
+    msg.chat.id,
+    `🆔 ID:\n${msg.chat.id}`
+  );
 });
 
 bot.onText(/\/redeem (.+)/, async (msg, match) => {
   try {
-    const result = await redeemCode(msg.chat.id, match[1]);
-    await bot.sendMessage(msg.chat.id, result.message);
+    const result = await redeemCode(
+      msg.chat.id,
+      match[1]
+    );
+
+    await bot.sendMessage(
+      msg.chat.id,
+      result.message
+    );
   } catch (err) {
-    await bot.sendMessage(msg.chat.id, `حدث خطأ:\n${err.message}`);
+    await bot.sendMessage(
+      msg.chat.id,
+      `حدث خطأ:\n${err.message}`
+    );
   }
 });
 
@@ -804,7 +1360,10 @@ bot.onText(/\/status/, async (msg) => {
   const sub = await getUserAccess(msg.chat.id);
 
   if (!sub) {
-    await bot.sendMessage(msg.chat.id, `🔒 لا يوجد اشتراك فعال`);
+    await bot.sendMessage(
+      msg.chat.id,
+      `🔒 لا يوجد اشتراك فعال`
+    );
     return;
   }
 
@@ -821,7 +1380,10 @@ ${formatDate(sub.expires_at)}`
 
 bot.onText(/\/gencode(?:\s+(\d+))?/, async (msg, match) => {
   if (!isAdmin(msg.chat.id)) {
-    await bot.sendMessage(msg.chat.id, '⛔ للأدمن فقط');
+    await bot.sendMessage(
+      msg.chat.id,
+      '⛔ للأدمن فقط'
+    );
     return;
   }
 
@@ -841,7 +1403,11 @@ ${days} يوم`
 
 bot.onText(/\/stop/, async (msg) => {
   clearUpdate(msg.chat.id);
-  await bot.sendMessage(msg.chat.id, '🛑 تم إيقاف التحديث');
+
+  await bot.sendMessage(
+    msg.chat.id,
+    '🛑 تم إيقاف التحديث'
+  );
 });
 
 bot.on('message', async (msg) => {
@@ -874,5 +1440,11 @@ checkExpiringSubscriptions();
 setInterval(() => {
   checkExpiringSubscriptions();
 }, CHECK_EXPIRY_INTERVAL);
+
+scanMarketFlows();
+
+setInterval(() => {
+  scanMarketFlows();
+}, SCANNER_INTERVAL_MS);
 
 console.log('ST Flow Stocks bot running...');
