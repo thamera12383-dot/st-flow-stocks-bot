@@ -1506,12 +1506,16 @@ ${failed}`
 bot.onText(/\/stats/, async (msg) => {
   try {
 
-    if (!isAdmin(msg)) {
-      return bot.sendMessage(
-        msg.chat.id,
-        '⛔ هذا الأمر للمالك فقط'
-      );
-    }
+    const adminOk =
+  String(msg.from.id) === '7507363697' ||
+  String(msg.chat.id) === '7507363697';
+
+if (!adminOk) {
+  return bot.sendMessage(
+    msg.chat.id,
+    '⛔ هذا الأمر للمالك فقط'
+  );
+}
 
     const { data: users, error } = await supabase
       .from('users_access')
