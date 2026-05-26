@@ -491,3 +491,202 @@ bot.onText(/\/status/, async (msg) => {
 ${formatDate(user.expires_at)}`
   );
 });
+
+async function getLatestFlows(symbol) {
+
+  try {
+
+    const { data, error } = await supabase
+      .from('live_flows')
+      .select('*')
+      .eq('symbol', symbol)
+      .order('created_at', { ascending: false })
+      .limit(5);
+
+    if (error) throw error;
+
+    return data || [];
+
+  } catch (err) {
+
+    console.error(err.message);
+    return [];
+
+  }
+
+}
+
+function institutionalScore(flow) {
+
+  let score = 0;
+
+  const premium = Number(flow.premium || 0);
+
+  if (premium >= 1000000) score += 5;
+  else if (premium >= 500000) score += 4;
+  else if (premium >= 250000) score += 3;
+  else if (premium >= 150000) score += 2;
+
+  if (flow.is_sweep) score += 2;
+
+  if (
+    String(flow.execution_type || '')
+      .includes('Ask')
+  ) {
+    score += 2;
+  }
+
+  return score;
+
+}
+
+function institutionalText(score) {
+
+  if (score >= 8)
+    return '🏦 مؤسسي قوي جدًا';
+
+  if (score >= 6)
+    return '🏦 مؤسسي';
+
+  if (score >= 4)
+    return '🟡 شبه مؤسسي';
+
+  return '👤 ريتيل';
+
+}
+
+function buildSymbolMessage(symbol, flows) {
+
+  if (!flows.length) {
+
+    return `⚠️ لا توجد تدفقات حديثة على ${symbol}`;
+
+  }
+
+  const top = flows[0];
+
+  const score =
+    institutionalScore(top);
+
+  const classification =
+    institutionalText(score);
+
+  const lines = flows.map((flow, i) => {
+
+    return `
+${i + 1}) ${flow.side}
+
+💰 Premium:
+$${fmt(flow.premium)}
+
+📦 الحجم:
+${fmt(flow.size)}
+
+⚡ التنفيذ:
+${flow.execution_type}
+
+🧹 Sweep:
+${flow.is_sweep ? '✅' : '❌'}
+`;
+
+  }).join('\n━━━━━━━━━━━━━━\n');
+
+  return `🚨 ${symbol} Live Flow
+
+🏦 التصنيف:
+${classification}
+
+━━━━━━━━━━━━━━
+
+${lines}
+
+━━━━━━━━━━━━━━
+
+🧠 القراءة:
+
+${classification.includes('مؤسسي')
+  ? 'يوجد دخول سيولة ذكية واضحة على السهم.'
+  : 'التدفقات الحالية ليست مؤسسية بشكل واضح.'}
+
+⏱ تحديث مباشر`;
+}
+
+bot.on('message', async (msg) => {
+
+  try {
+
+    const text = String(msg.text || '')
+      .trim()
+      .toUpperCase();
+
+    if (!text) return;
+
+    if (text.startsWith('/')) return;
+
+    if (!/^[A-Z]{1,5}$/.test(text)) {
+
+      return bot.sendMessage(
+        msg.chat.id,
+`⚠️ الرمز غير صحيح
+
+أمثلة:
+TSLA
+NVDA
+SPY`
+      );
+
+    }
+
+    const symbol = text;
+
+    const { data: user } = await supabase
+      .from('users_access')
+      .select('*')
+      .eq('telegram_id', String(msg.chat.id))
+      .single();
+
+    if (
+      !user ||
+      !user.active ||
+      !user.expires_at ||
+      new Date(user.expires_at).getTime() < Date.now()
+    ) {
+
+      return bot.sendMessage(
+        msg.chat.id,
+`🔒 الاشتراك غير مفعل
+
+للتفعيل:
+/redeem CODE`
+      );
+
+    }
+
+    await bot.sendMessage(
+      msg.chat.id,
+      `⏳ جاري فحص ${symbol}...`
+    );
+
+    const flows =
+      await getLatestFlows(symbol);
+
+    const message =
+      buildSymbolMessage(symbol, flows);
+
+    await bot.sendMessage(
+      msg.chat.id,
+      message
+    );
+
+  } catch (err) {
+
+    console.error(err);
+
+    await bot.sendMessage(
+      msg.chat.id,
+      `⚠️ حدث خطأ\n${err.message}`
+    );
+
+  }
+
+});
