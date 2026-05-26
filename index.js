@@ -1,7 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { createClient } = require('@supabase/supabase-js');
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: false });
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
 const API_KEY = process.env.MASSIVE_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
