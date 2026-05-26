@@ -31,8 +31,8 @@ const WATCHLIST = [
   'META'
 ];
 
-const MIN_PREMIUM = 150000;
-const MIN_SIZE = 100;
+const MIN_PREMIUM = 500000;
+const MIN_SIZE = 20;
 const MAX_SPREAD_PERCENT = 15;
 const ALERT_COOLDOWN_MS = 2 * 60 * 1000;
 
