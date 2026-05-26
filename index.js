@@ -20,7 +20,7 @@ const activeUpdates = new Map();
 const sentFlowAlerts = new Map();
 
 const watchlist = new Set(
-  String(process.env.FLOW_WATCHLIST || DEFAULT_WATCHLIST.join(','))
+  String(process.env.FLOW_WATCHLIST || '')
     .split(',')
     .map(x => x.trim().toUpperCase())
     .filter(Boolean)
