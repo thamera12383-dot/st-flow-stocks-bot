@@ -26,10 +26,10 @@ const watchlist = new Set(
     .filter(Boolean)
 );
 
-const USER_COOLDOWN_SECONDS = 60;
-const CACHE_SECONDS = 180;
-const UPDATE_INTERVAL_MS = 3 * 60 * 1000;
-const UPDATE_DURATION_MS = 3 * 60 * 1000;
+const USER_COOLDOWN_SECONDS = 10;
+const CACHE_SECONDS = 60;
+const UPDATE_INTERVAL_MS = 60 * 1000;
+const UPDATE_DURATION_MS = 5 * 60 * 1000;
 
 const SCANNER_INTERVAL_MS = 60 * 1000;
 const FLOW_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
