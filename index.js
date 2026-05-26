@@ -1428,11 +1428,11 @@ setInterval(() => {
   checkExpiringSubscriptions();
 }, CHECK_EXPIRY_INTERVAL);
 
-scanMarketFlows();
+// scanMarketFlows();
 
-setInterval(() => {
-  scanMarketFlows();
-}, SCANNER_INTERVAL_MS);
+// setInterval(() => {
+//   scanMarketFlows();
+// }, SCANNER_INTERVAL_MS);
 
 bot.onText(/\/broadcast ([\s\S]+)/, async (msg, match) => {
   try {
