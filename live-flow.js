@@ -2,6 +2,10 @@ const TelegramBot = require('node-telegram-bot-api');
 const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
 
+const {
+  institutionalScore,
+  institutionalText
+} = require('./institutional-engine');
 const bot = new TelegramBot(process.env.BOT_TOKEN, {
   polling: true
 });
@@ -513,46 +517,6 @@ async function getLatestFlows(symbol) {
     return [];
 
   }
-
-}
-
-function institutionalScore(flow) {
-
-  let score = 0;
-
-  const premium = Number(flow.premium || 0);
-
-  if (premium >= 1000000) score += 5;
-  else if (premium >= 500000) score += 4;
-  else if (premium >= 250000) score += 3;
-  else if (premium >= 150000) score += 2;
-
-  if (flow.is_sweep) score += 2;
-
-  if (
-    String(flow.execution_type || '')
-      .includes('Ask')
-  ) {
-    score += 2;
-  }
-
-  return score;
-
-}
-
-function institutionalText(score) {
-
-  if (score >= 8)
-    return '🏦 مؤسسي قوي جدًا';
-
-  if (score >= 6)
-    return '🏦 مؤسسي';
-
-  if (score >= 4)
-    return '🟡 شبه مؤسسي';
-
-  return '👤 ريتيل';
-
 }
 
 function buildSymbolMessage(symbol, flows) {
