@@ -559,5 +559,43 @@ async function autoScan() {
 
 bot.sendMessage(ADMIN_CHAT_ID, '✅ ST GEX Bot اشتغل: اشتراكات + يدوي + تلقائي');
 
-setInterval(autoScan, AUTO_SCAN_MS);
-autoScan();
+function isMarketOpenNY() {
+  const now = new Date();
+
+  const nyTime = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    weekday: 'short'
+  }).formatToParts(now);
+
+  const get = (type) => nyTime.find(p => p.type === type)?.value;
+
+  const day = get('weekday');
+  const hour = Number(get('hour'));
+  const minute = Number(get('minute'));
+
+  // إيقاف السبت والأحد
+  if (day === 'Sat' || day === 'Sun') return false;
+
+  const totalMinutes = hour * 60 + minute;
+
+  // السوق الأمريكي: 9:30 صباحًا إلى 4:00 مساءً بتوقيت نيويورك
+  const marketOpen = 9 * 60 + 30;
+  const marketClose = 16 * 60;
+
+  return totalMinutes >= marketOpen && totalMinutes <= marketClose;
+}
+
+setInterval(() => {
+  if (isMarketOpenNY()) {
+    autoScan();
+  } else {
+    console.log('AUTO SCAN OFF: Market closed');
+  }
+}, AUTO_SCAN_MS);
+
+if (isMarketOpenNY()) {
+  autoScan();
+}
