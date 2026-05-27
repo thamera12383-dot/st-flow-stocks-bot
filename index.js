@@ -8,8 +8,10 @@ const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 const API_KEY = process.env.MASSIVE_API_KEY;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 
-// الأسهم التلقائية
-const WATCHLIST = ['SPY', 'QQQ', 'AAPL', 'AMD', 'TSLA', 'NVDA'];
+const WATCHLIST = ['SPY', 'QQQ', 'TSLA', 'NVDA', 'AAPL', 'AMD'];
+
+// ALL = كل الانتهاءات
+const EXPIRATION_MODE = 'ALL';
 
 const AUTO_SCAN_MS = 5 * 60 * 1000;
 const USER_COOLDOWN_MS = 15 * 1000;
@@ -22,9 +24,7 @@ const lastAlert = new Map();
 
 function fmt(n) {
   if (n === null || n === undefined || Number.isNaN(Number(n))) return 'N/A';
-  return Number(n).toLocaleString('en-US', {
-    maximumFractionDigits: 2
-  });
+  return Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 });
 }
 
 function isValidSymbol(text) {
@@ -32,25 +32,58 @@ function isValidSymbol(text) {
 }
 
 async function getOptionSnapshot(symbol) {
-  const url = `https://api.massive.com/v3/snapshot/options/${symbol}`;
+  let url = `https://api.massive.com/v3/snapshot/options/${symbol}`;
+  let results = [];
 
-  const res = await axios.get(url, {
-    params: {
-      apiKey: API_KEY,
-      limit: 250
-    },
-    timeout: 15000
-  });
+  while (url) {
+    const res = await axios.get(url, {
+      params: url.includes('?') ? {} : {
+        apiKey: API_KEY,
+        limit: 250
+      },
+      timeout: 20000
+    });
 
-  return res.data;
+    results = results.concat(res.data.results || []);
+
+    if (res.data.next_url) {
+      url = `${res.data.next_url}&apiKey=${API_KEY}`;
+    } else {
+      url = null;
+    }
+
+    if (results.length >= 1500) break;
+  }
+
+  return { results };
+}
+
+function filterByExpiration(results) {
+  return results; // نحسب كل الانتهاءات
+}
+
+function getExpirationInfo(results) {
+  const expirations = [...new Set(
+    results
+      .map(x => x.details?.expiration_date)
+      .filter(Boolean)
+  )].sort();
+
+  return {
+    nearestExpiration: expirations[0] || 'N/A',
+    farthestExpiration: expirations[expirations.length - 1] || 'N/A',
+    expirationCount: expirations.length
+  };
 }
 
 function calculateGex(data) {
-  const results = data.results || [];
+  const filteredResults = filterByExpiration(data.results || []);
+  const expInfo = getExpirationInfo(filteredResults);
+
   const byStrike = {};
   let spot = null;
 
-  for (const item of results) {
+  for (const item of filteredResults) {
     const details = item.details || {};
     const greeks = item.greeks || {};
 
@@ -59,7 +92,7 @@ function calculateGex(data) {
     const gamma = Number(greeks.gamma || 0);
     const oi = Number(item.open_interest || 0);
 
-    if (!spot && item.underlying_asset && item.underlying_asset.price) {
+    if (!spot && item.underlying_asset?.price) {
       spot = Number(item.underlying_asset.price);
     }
 
@@ -74,7 +107,7 @@ function calculateGex(data) {
       };
     }
 
-    // Net GEX Strike = (Call OI * Call Gamma * 100) - (Put OI * Put Gamma * 100)
+    // Net GEX = (Call OI × Call Gamma × 100) - (Put OI × Put Gamma × 100)
     const gex = oi * gamma * 100;
 
     if (type === 'call') {
@@ -100,17 +133,27 @@ function calculateGex(data) {
     Math.abs(b.netGex) < Math.abs(a.netGex) ? b : a
   );
 
+  const topLevels = [...rows]
+    .sort((a, b) => Math.abs(b.netGex) - Math.abs(a.netGex))
+    .slice(0, 5);
+
   return {
     spot,
+    mode: EXPIRATION_MODE,
+    nearestExpiration: expInfo.nearestExpiration,
+    farthestExpiration: expInfo.farthestExpiration,
+    expirationCount: expInfo.expirationCount,
     callWall,
     putWall,
     flip,
+    topLevels,
     rows
   };
 }
 
 async function analyzeGex(symbol) {
-  const cached = gexCache.get(symbol);
+  const cacheKey = `${symbol}-${EXPIRATION_MODE}`;
+  const cached = gexCache.get(cacheKey);
 
   if (cached && Date.now() - cached.time < CACHE_MS) {
     return cached.data;
@@ -119,7 +162,7 @@ async function analyzeGex(symbol) {
   const data = await getOptionSnapshot(symbol);
   const analysis = calculateGex(data);
 
-  gexCache.set(symbol, {
+  gexCache.set(cacheKey, {
     time: Date.now(),
     data: analysis
   });
@@ -127,33 +170,57 @@ async function analyzeGex(symbol) {
   return analysis;
 }
 
+function buildMiniChart(levels) {
+  return levels.map(l => {
+    const icon = l.netGex >= 0 ? '🟩' : '🟥';
+    return `${icon} سترايك ${l.strike} | ${fmt(l.netGex)}`;
+  }).join('\n');
+}
+
 function buildMessage(symbol, a) {
+  const aboveFlip = a.spot > a.flip.strike;
+
+  const directionText = aboveFlip
+    ? `🚀 السعر فوق Gamma Flip ${a.flip.strike}`
+    : `🔻 السعر تحت Gamma Flip ${a.flip.strike}`;
+
   return `🧠 ST GEX Analysis
 
 📊 السهم: ${symbol}
 💵 السعر الحالي: ${fmt(a.spot)}
 
-🟩 Call Wall: ${a.callWall.strike}
+🗓️ الانتهاء المستخدم: كل الانتهاءات
+📅 أقرب انتهاء: ${a.nearestExpiration}
+📅 أبعد انتهاء: ${a.farthestExpiration}
+🔢 عدد الانتهاءات: ${a.expirationCount}
+
+🟩 مقاومة جاما:
+سترايك ${a.callWall.strike}
 القوة: +${fmt(a.callWall.netGex)}
 
-🟥 Put Wall: ${a.putWall.strike}
+🟥 دعم جاما:
+سترايك ${a.putWall.strike}
 القوة: ${fmt(a.putWall.netGex)}
 
-🎯 Gamma Flip: ${a.flip.strike}
+🎯 Gamma Flip:
+سترايك ${a.flip.strike}
 القيمة: ${fmt(a.flip.netGex)}
 
-📌 الحسبة:
-Net GEX = (Call OI × Call Gamma × 100) - (Put OI × Put Gamma × 100)
+📍 حالة السعر:
+${directionText}
+
+📊 أقوى مستويات الجاما:
+${buildMiniChart(a.topLevels)}
 
 ⚠️ القراءة:
-فوق Gamma Flip = حركة أسرع غالبًا
-قرب Call Wall = احتمال تهدئة/مقاومة
-قرب Put Wall = احتمال دعم/ارتداد
+🟩 قرب مقاومة الجاما = احتمال تهدئة / رفض
+🟥 قرب دعم الجاما = احتمال ارتداد / دعم
+🎯 اختراق Gamma Flip = زيادة سرعة الحركة
 
 ليست توصية شراء أو بيع.`;
 }
 
-// يدوي: اكتب الرمز مباشرة مثل AAPL
+// يدوي
 bot.on('message', async (msg) => {
   try {
     if (!msg.text) return;
@@ -165,6 +232,7 @@ bot.on('message', async (msg) => {
     if (!isValidSymbol(symbol)) return;
 
     const last = userCooldown.get(chatId);
+
     if (last && Date.now() - last < USER_COOLDOWN_MS) {
       return bot.sendMessage(chatId, '⏳ انتظر 15 ثانية قبل طلب سهم جديد.');
     }
@@ -174,18 +242,20 @@ bot.on('message', async (msg) => {
     await bot.sendMessage(chatId, `⏳ جاري تحليل GEX لـ ${symbol}...`);
 
     const analysis = await analyzeGex(symbol);
+
     await bot.sendMessage(chatId, buildMessage(symbol, analysis));
 
   } catch (err) {
     console.error('MANUAL ERROR:', err.response?.data || err.message);
+
     await bot.sendMessage(
       msg.chat.id,
-      '❌ لم أستطع جلب بيانات GEX لهذا الرمز. تأكد أن الرمز صحيح وأن اشتراك Massive يدعم بيانات Options/Greeks/OI.'
+      '❌ لم أستطع جلب بيانات GEX لهذا الرمز. تأكد أن الرمز صحيح وأن اشتراك Massive يدعم Options/Greeks/OI.'
     );
   }
 });
 
-// تلقائي: يفحص الأسهم المحددة في WATCHLIST
+// تلقائي
 async function autoScan() {
   if (!ADMIN_CHAT_ID) return;
 
@@ -207,9 +277,9 @@ async function autoScan() {
       if (!nearCall && !nearPut && !nearFlip) continue;
 
       const reason = [
-        nearCall ? '🟩 قريب من Call Wall' : null,
-        nearPut ? '🟥 قريب من Put Wall' : null,
-        nearFlip ? '🎯 قريب من Gamma Flip' : null
+        nearCall ? `🟩 قريب من مقاومة جاما ${a.callWall.strike}` : null,
+        nearPut ? `🟥 قريب من دعم جاما ${a.putWall.strike}` : null,
+        nearFlip ? `🎯 قريب من Gamma Flip ${a.flip.strike}` : null
       ].filter(Boolean).join('\n');
 
       const key = `${symbol}-${reason}`;
@@ -236,7 +306,7 @@ ${buildMessage(symbol, a)}`
 
 bot.sendMessage(
   ADMIN_CHAT_ID,
-  '✅ ST GEX Bot اشتغل: يدوي + تلقائي'
+  '✅ ST GEX Bot اشتغل: يدوي + تلقائي | كل الانتهاءات'
 );
 
 setInterval(autoScan, AUTO_SCAN_MS);
