@@ -2,16 +2,22 @@ require('dotenv').config();
 
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
+const crypto = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
 const API_KEY = process.env.MASSIVE_API_KEY;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
 const WATCHLIST = ['SPY', 'QQQ', 'TSLA', 'NVDA', 'AAPL', 'AMD'];
 
 const EXPIRATION_MODE = 'ALL';
-
 const AUTO_SCAN_MS = 5 * 60 * 1000;
 const USER_COOLDOWN_MS = 15 * 1000;
 const CACHE_MS = 60 * 1000;
@@ -24,6 +30,14 @@ const userCooldown = new Map();
 const gexCache = new Map();
 const lastAlert = new Map();
 
+function isAdmin(userId) {
+  return String(userId) === String(ADMIN_CHAT_ID);
+}
+
+function generateCode() {
+  return `ST-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+}
+
 function fmt(n) {
   if (n === null || n === undefined || Number.isNaN(Number(n))) return 'N/A';
   return Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 });
@@ -33,18 +47,162 @@ function isValidSymbol(text) {
   return /^[A-Z]{1,6}$/.test(text);
 }
 
+async function hasActiveSubscription(userId) {
+  if (isAdmin(userId)) return true;
+
+  const { data, error } = await supabase
+    .from('subscribers')
+    .select('expires_at')
+    .eq('user_id', String(userId))
+    .single();
+
+  if (error || !data) return false;
+
+  return Number(data.expires_at) > Date.now();
+}
+
+async function remainingDays(userId) {
+  const { data } = await supabase
+    .from('subscribers')
+    .select('expires_at')
+    .eq('user_id', String(userId))
+    .single();
+
+  if (!data) return 0;
+
+  const ms = Number(data.expires_at) - Date.now();
+  return Math.max(0, Math.ceil(ms / (1000 * 60 * 60 * 24)));
+}
+
+// إنشاء كود
+bot.onText(/^\/create\s+(\d+)$/i, async (msg, match) => {
+  if (!isAdmin(msg.from.id)) return;
+
+  const days = parseInt(match[1], 10);
+  const code = generateCode();
+
+  const { error } = await supabase.from('invite_codes').insert({
+    code,
+    days,
+    used: false
+  });
+
+  if (error) {
+    return bot.sendMessage(msg.chat.id, '❌ فشل إنشاء الكود.');
+  }
+
+  await bot.sendMessage(
+    msg.chat.id,
+    `✅ تم إنشاء كود جديد\n\n🔑 الكود:\n${code}\n\n⏳ المدة: ${days} يوم`
+  );
+});
+
+// عرض الأكواد
+bot.onText(/^\/codes$/i, async (msg) => {
+  if (!isAdmin(msg.from.id)) return;
+
+  const { data, error } = await supabase
+    .from('invite_codes')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(30);
+
+  if (error || !data.length) {
+    return bot.sendMessage(msg.chat.id, '❌ لا توجد أكواد.');
+  }
+
+  let text = '📋 آخر الأكواد:\n\n';
+
+  for (const c of data) {
+    text += `🔑 ${c.code}\n⏳ ${c.days} يوم\n📌 مستخدم: ${c.used ? 'نعم' : 'لا'}\n\n`;
+  }
+
+  await bot.sendMessage(msg.chat.id, text);
+});
+
+// عرض المشتركين
+bot.onText(/^\/users$/i, async (msg) => {
+  if (!isAdmin(msg.from.id)) return;
+
+  const { data, error } = await supabase
+    .from('subscribers')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(50);
+
+  if (error || !data.length) {
+    return bot.sendMessage(msg.chat.id, '❌ لا يوجد مشتركين.');
+  }
+
+  let text = '👥 المشتركين:\n\n';
+
+  for (const u of data) {
+    const days = await remainingDays(u.user_id);
+    text += `🆔 ${u.user_id}\n⏳ المتبقي: ${days} يوم\n\n`;
+  }
+
+  await bot.sendMessage(msg.chat.id, text);
+});
+
+// حذف مشترك
+bot.onText(/^\/remove\s+(\d+)$/i, async (msg, match) => {
+  if (!isAdmin(msg.from.id)) return;
+
+  const targetId = match[1];
+
+  await supabase
+    .from('subscribers')
+    .delete()
+    .eq('user_id', String(targetId));
+
+  await bot.sendMessage(msg.chat.id, `✅ تم حذف المستخدم ${targetId}`);
+});
+
+async function activateCode(code, userId, chatId) {
+  const { data, error } = await supabase
+    .from('invite_codes')
+    .select('*')
+    .eq('code', code)
+    .single();
+
+  if (error || !data) return false;
+
+  if (data.used) {
+    await bot.sendMessage(chatId, '❌ الكود مستخدم مسبقًا.');
+    return true;
+  }
+
+  const expiresAt = Date.now() + data.days * 24 * 60 * 60 * 1000;
+
+  await supabase.from('subscribers').upsert({
+    user_id: String(userId),
+    expires_at: expiresAt
+  });
+
+  await supabase
+    .from('invite_codes')
+    .update({
+      used: true,
+      used_by: String(userId),
+      used_at: new Date().toISOString()
+    })
+    .eq('code', code);
+
+  await bot.sendMessage(
+    chatId,
+    `✅ تم تفعيل اشتراكك\n\n⏳ المدة: ${data.days} يوم\n📅 المتبقي: ${data.days} يوم`
+  );
+
+  return true;
+}
+
 async function getOptionSnapshot(symbol) {
   let url = `https://api.massive.com/v3/snapshot/options/${symbol}`;
   let results = [];
 
   while (url) {
     const res = await axios.get(url, {
-      params: url.includes('?')
-        ? {}
-        : {
-            apiKey: API_KEY,
-            limit: 250
-          },
+      params: url.includes('?') ? {} : { apiKey: API_KEY, limit: 250 },
       timeout: 20000
     });
 
@@ -64,11 +222,7 @@ async function getOptionSnapshot(symbol) {
 
 function getExpirationInfo(results) {
   const expirations = [
-    ...new Set(
-      results
-        .map(x => x.details?.expiration_date)
-        .filter(Boolean)
-    )
+    ...new Set(results.map(x => x.details?.expiration_date).filter(Boolean))
   ].sort();
 
   return {
@@ -129,9 +283,7 @@ function calculateGex(data) {
 
   const rows = Object.values(byStrike).sort((a, b) => a.strike - b.strike);
 
-  if (!rows.length) {
-    throw new Error('NO_GEX_DATA');
-  }
+  if (!rows.length) throw new Error('NO_GEX_DATA');
 
   const nearbyRows = rows.filter(r => isNearSpot(r.strike, spot));
 
@@ -158,7 +310,7 @@ function calculateGex(data) {
     Math.abs(b.netGex) < Math.abs(a.netGex) ? b : a
   );
 
-  const topLevels = [...nearbyRows.length ? nearbyRows : rows]
+  const topLevels = (nearbyRows.length ? nearbyRows : rows)
     .sort((a, b) => Math.abs(b.netGex) - Math.abs(a.netGex))
     .slice(0, 5);
 
@@ -167,17 +319,8 @@ function calculateGex(data) {
     Math.abs(putWall.netGex)
   );
 
-  const callStrengthRatio = strongestWall
-    ? Math.abs(callWall.netGex) / strongestWall
-    : 0;
-
-  const putStrengthRatio = strongestWall
-    ? Math.abs(putWall.netGex) / strongestWall
-    : 0;
-
   return {
     spot,
-    mode: EXPIRATION_MODE,
     nearestExpiration: expInfo.nearestExpiration,
     farthestExpiration: expInfo.farthestExpiration,
     expirationCount: expInfo.expirationCount,
@@ -185,9 +328,8 @@ function calculateGex(data) {
     putWall,
     flip,
     topLevels,
-    rows,
-    callStrengthRatio,
-    putStrengthRatio
+    callStrengthRatio: strongestWall ? Math.abs(callWall.netGex) / strongestWall : 0,
+    putStrengthRatio: strongestWall ? Math.abs(putWall.netGex) / strongestWall : 0
   };
 }
 
@@ -277,9 +419,24 @@ bot.on('message', async (msg) => {
     if (msg.text.startsWith('/')) return;
 
     const chatId = msg.chat.id;
-    const symbol = msg.text.trim().toUpperCase();
+    const userId = msg.from.id;
+    const text = msg.text.trim().toUpperCase();
 
-    if (!isValidSymbol(symbol)) return;
+    if (text.startsWith('ST-')) {
+      const activated = await activateCode(text, userId, chatId);
+      if (activated) return;
+    }
+
+    if (!isValidSymbol(text)) return;
+
+    const active = await hasActiveSubscription(userId);
+
+    if (!active) {
+      return bot.sendMessage(
+        chatId,
+        '❌ لا تملك اشتراك فعال.\n\nراسل الإدارة للحصول على كود تفعيل.'
+      );
+    }
 
     const last = userCooldown.get(chatId);
 
@@ -289,18 +446,14 @@ bot.on('message', async (msg) => {
 
     userCooldown.set(chatId, Date.now());
 
-    await bot.sendMessage(chatId, `⏳ جاري تحليل GEX لـ ${symbol}...`);
+    await bot.sendMessage(chatId, `⏳ جاري تحليل GEX لـ ${text}...`);
 
-    const analysis = await analyzeGex(symbol);
+    const analysis = await analyzeGex(text);
 
-    await bot.sendMessage(chatId, buildMessage(symbol, analysis));
+    await bot.sendMessage(chatId, buildMessage(text, analysis));
   } catch (err) {
     console.error('MANUAL ERROR:', err.response?.data || err.message);
-
-    await bot.sendMessage(
-      msg.chat.id,
-      '❌ لم أستطع جلب بيانات GEX لهذا الرمز.'
-    );
+    await bot.sendMessage(msg.chat.id, '❌ لم أستطع جلب بيانات GEX لهذا الرمز.');
   }
 });
 
@@ -313,11 +466,8 @@ async function autoScan() {
 
       if (!a.spot) continue;
 
-      const callWallStrong =
-        a.callStrengthRatio >= MIN_WALL_STRENGTH_RATIO;
-
-      const putWallStrong =
-        a.putStrengthRatio >= MIN_WALL_STRENGTH_RATIO;
+      const callWallStrong = a.callStrengthRatio >= MIN_WALL_STRENGTH_RATIO;
+      const putWallStrong = a.putStrengthRatio >= MIN_WALL_STRENGTH_RATIO;
 
       const nearCall =
         callWallStrong &&
@@ -336,9 +486,7 @@ async function autoScan() {
         nearCall ? `🟩 قريب من مقاومة جاما قوية ${a.callWall.strike}` : null,
         nearPut ? `🟥 قريب من دعم جاما قوي ${a.putWall.strike}` : null,
         nearFlip ? `🎯 قريب من Gamma Flip ${a.flip.strike}` : null
-      ]
-        .filter(Boolean)
-        .join('\n');
+      ].filter(Boolean).join('\n');
 
       const key = `${symbol}-${reason}`;
       const last = lastAlert.get(key);
@@ -349,11 +497,7 @@ async function autoScan() {
 
       await bot.sendMessage(
         ADMIN_CHAT_ID,
-        `🚨 تنبيه تلقائي GEX
-
-${reason}
-
-${buildMessage(symbol, a)}`
+        `🚨 تنبيه تلقائي GEX\n\n${reason}\n\n${buildMessage(symbol, a)}`
       );
     } catch (err) {
       console.error(`AUTO ERROR ${symbol}:`, err.response?.data || err.message);
@@ -361,10 +505,7 @@ ${buildMessage(symbol, a)}`
   }
 }
 
-bot.sendMessage(
-  ADMIN_CHAT_ID,
-  '✅ ST GEX Bot اشتغل: يدوي + تلقائي'
-);
+bot.sendMessage(ADMIN_CHAT_ID, '✅ ST GEX Bot اشتغل: اشتراكات + يدوي + تلقائي');
 
 setInterval(autoScan, AUTO_SCAN_MS);
 autoScan();
