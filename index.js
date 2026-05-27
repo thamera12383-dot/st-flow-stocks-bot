@@ -18,6 +18,7 @@ const supabase = createClient(
 const WATCHLIST = ['SPY', 'QQQ', 'TSLA', 'NVDA', 'AAPL', 'AMD'];
 
 const EXPIRATION_MODE = 'ALL';
+
 const AUTO_SCAN_MS = 5 * 60 * 1000;
 const USER_COOLDOWN_MS = 15 * 1000;
 const CACHE_MS = 60 * 1000;
@@ -47,6 +48,17 @@ function isValidSymbol(text) {
   return /^[A-Z]{1,6}$/.test(text);
 }
 
+function distancePercent(spot, strike) {
+  if (!spot || !strike) return null;
+  return ((strike - spot) / spot) * 100;
+}
+
+function fmtPercent(n) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return 'N/A';
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${n.toFixed(2)}%`;
+}
+
 async function hasActiveSubscription(userId) {
   if (isAdmin(userId)) return true;
 
@@ -74,7 +86,6 @@ async function remainingDays(userId) {
   return Math.max(0, Math.ceil(ms / (1000 * 60 * 60 * 24)));
 }
 
-// إنشاء كود
 bot.onText(/^\/create\s+(\d+)$/i, async (msg, match) => {
   if (!isAdmin(msg.from.id)) return;
 
@@ -93,11 +104,15 @@ bot.onText(/^\/create\s+(\d+)$/i, async (msg, match) => {
 
   await bot.sendMessage(
     msg.chat.id,
-    `✅ تم إنشاء كود جديد\n\n🔑 الكود:\n${code}\n\n⏳ المدة: ${days} يوم`
+    `✅ تم إنشاء كود جديد
+
+🔑 الكود:
+${code}
+
+⏳ المدة: ${days} يوم`
   );
 });
 
-// عرض الأكواد
 bot.onText(/^\/codes$/i, async (msg) => {
   if (!isAdmin(msg.from.id)) return;
 
@@ -114,13 +129,16 @@ bot.onText(/^\/codes$/i, async (msg) => {
   let text = '📋 آخر الأكواد:\n\n';
 
   for (const c of data) {
-    text += `🔑 ${c.code}\n⏳ ${c.days} يوم\n📌 مستخدم: ${c.used ? 'نعم' : 'لا'}\n\n`;
+    text += `🔑 ${c.code}
+⏳ ${c.days} يوم
+📌 مستخدم: ${c.used ? 'نعم' : 'لا'}
+
+`;
   }
 
   await bot.sendMessage(msg.chat.id, text);
 });
 
-// عرض المشتركين
 bot.onText(/^\/users$/i, async (msg) => {
   if (!isAdmin(msg.from.id)) return;
 
@@ -138,13 +156,15 @@ bot.onText(/^\/users$/i, async (msg) => {
 
   for (const u of data) {
     const days = await remainingDays(u.user_id);
-    text += `🆔 ${u.user_id}\n⏳ المتبقي: ${days} يوم\n\n`;
+    text += `🆔 ${u.user_id}
+⏳ المتبقي: ${days} يوم
+
+`;
   }
 
   await bot.sendMessage(msg.chat.id, text);
 });
 
-// حذف مشترك
 bot.onText(/^\/remove\s+(\d+)$/i, async (msg, match) => {
   if (!isAdmin(msg.from.id)) return;
 
@@ -190,7 +210,10 @@ async function activateCode(code, userId, chatId) {
 
   await bot.sendMessage(
     chatId,
-    `✅ تم تفعيل اشتراكك\n\n⏳ المدة: ${data.days} يوم\n📅 المتبقي: ${data.days} يوم`
+    `✅ تم تفعيل اشتراكك
+
+⏳ المدة: ${data.days} يوم
+📅 المتبقي: ${data.days} يوم`
   );
 
   return true;
@@ -361,6 +384,32 @@ function buildMiniChart(levels) {
     .join('\n');
 }
 
+function buildSummary(a) {
+  const callDistance = distancePercent(a.spot, a.callWall.strike);
+  const putDistance = distancePercent(a.spot, a.putWall.strike);
+
+  const supportStrong = a.putStrengthRatio >= MIN_WALL_STRENGTH_RATIO;
+  const resistanceStrong = a.callStrengthRatio >= MIN_WALL_STRENGTH_RATIO;
+
+  if (putDistance !== null && putDistance <= 0 && Math.abs(putDistance) <= 1.0 && supportStrong) {
+    return `السهم يتمسك فوق دعم جاما قوي ${a.putWall.strike}
+وأول مقاومة مؤثرة عند ${a.callWall.strike}`;
+  }
+
+  if (callDistance !== null && callDistance >= 0 && callDistance <= 1.0 && resistanceStrong) {
+    return `السهم قريب جدًا من مقاومة جاما قوية ${a.callWall.strike}
+وقد يواجه تهدئة أو رفض سعري`;
+  }
+
+  if (a.spot > a.flip.strike) {
+    return `السهم فوق Gamma Flip ${a.flip.strike}
+والبيئة الحالية إيجابية نسبيًا، مع مراقبة دعم ${a.putWall.strike} ومقاومة ${a.callWall.strike}`;
+  }
+
+  return `السهم تحت Gamma Flip ${a.flip.strike}
+والبيئة الحالية سلبية أو أكثر عنفًا، مع مراقبة دعم ${a.putWall.strike} ومقاومة ${a.callWall.strike}`;
+}
+
 function buildMessage(symbol, a) {
   const aboveFlip = a.spot > a.flip.strike;
 
@@ -378,6 +427,9 @@ function buildMessage(symbol, a) {
       ? '🟩 أقرب مقاومة جاما ضعيفة:'
       : '🟩 أقرب مقاومة جاما قوية:';
 
+  const callDist = fmtPercent(distancePercent(a.spot, a.callWall.strike));
+  const putDist = fmtPercent(distancePercent(a.spot, a.putWall.strike));
+
   return `🧠 ST GEX Analysis
 
 📊 السهم: ${symbol}
@@ -390,10 +442,12 @@ function buildMessage(symbol, a) {
 ${resistanceTitle}
 سترايك ${a.callWall.strike}
 القوة: +${fmt(a.callWall.netGex)}
+المسافة: ${callDist}
 
 ${supportTitle}
 سترايك ${a.putWall.strike}
 القوة: ${fmt(a.putWall.netGex)}
+المسافة: ${putDist}
 
 🎯 Gamma Flip:
 سترايك ${a.flip.strike}
@@ -405,10 +459,8 @@ ${directionText}
 📊 أقوى مستويات الجاما القريبة:
 ${buildMiniChart(a.topLevels)}
 
-⚠️ القراءة:
-🟩 قرب مقاومة الجاما = احتمال تهدئة / رفض
-🟥 قرب دعم الجاما = احتمال ارتداد / دعم
-🎯 اختراق Gamma Flip = زيادة سرعة الحركة
+📌 الخلاصة:
+${buildSummary(a)}
 
 ليست توصية شراء أو بيع.`;
 }
