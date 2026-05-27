@@ -17,7 +17,7 @@ const USER_COOLDOWN_MS = 15 * 1000;
 const CACHE_MS = 60 * 1000;
 const ALERT_COOLDOWN_MS = 10 * 60 * 1000;
 
-// أقل قوة للجدار حتى يعتبر مهم في التنبيهات
+const NEAR_SPOT_RANGE = 0.15;
 const MIN_WALL_STRENGTH_RATIO = 0.20;
 
 const userCooldown = new Map();
@@ -78,6 +78,11 @@ function getExpirationInfo(results) {
   };
 }
 
+function isNearSpot(strike, spot) {
+  if (!spot) return true;
+  return Math.abs(strike - spot) / spot <= NEAR_SPOT_RANGE;
+}
+
 function calculateGex(data) {
   const results = data.results || [];
   const expInfo = getExpirationInfo(results);
@@ -128,27 +133,32 @@ function calculateGex(data) {
     throw new Error('NO_GEX_DATA');
   }
 
-  const callWall = rows.reduce((a, b) =>
-    b.netGex > a.netGex ? b : a
-  );
+  const nearbyRows = rows.filter(r => isNearSpot(r.strike, spot));
 
-  const putWall = rows.reduce((a, b) =>
-    b.netGex < a.netGex ? b : a
-  );
+  const callCandidates = nearbyRows.filter(r => r.netGex > 0);
+  const putCandidates = nearbyRows.filter(r => r.netGex < 0);
 
-  const nearSpotRows = rows.filter(r => {
-    if (!spot) return true;
-    const distance = Math.abs(r.strike - spot) / spot;
-    return distance <= 0.15;
-  });
+  const allCallCandidates = rows.filter(r => r.netGex > 0);
+  const allPutCandidates = rows.filter(r => r.netGex < 0);
 
-  const flipSource = nearSpotRows.length ? nearSpotRows : rows;
+  const callWallSource = callCandidates.length ? callCandidates : allCallCandidates;
+  const putWallSource = putCandidates.length ? putCandidates : allPutCandidates;
+
+  const callWall = callWallSource.length
+    ? callWallSource.reduce((a, b) => (b.netGex > a.netGex ? b : a))
+    : rows.reduce((a, b) => (b.netGex > a.netGex ? b : a));
+
+  const putWall = putWallSource.length
+    ? putWallSource.reduce((a, b) => (b.netGex < a.netGex ? b : a))
+    : rows.reduce((a, b) => (b.netGex < a.netGex ? b : a));
+
+  const flipSource = nearbyRows.length ? nearbyRows : rows;
 
   const flip = flipSource.reduce((a, b) =>
     Math.abs(b.netGex) < Math.abs(a.netGex) ? b : a
   );
 
-  const topLevels = [...rows]
+  const topLevels = [...nearbyRows.length ? nearbyRows : rows]
     .sort((a, b) => Math.abs(b.netGex) - Math.abs(a.netGex))
     .slice(0, 5);
 
@@ -157,8 +167,13 @@ function calculateGex(data) {
     Math.abs(putWall.netGex)
   );
 
-  const callStrengthRatio = Math.abs(callWall.netGex) / strongestWall;
-  const putStrengthRatio = Math.abs(putWall.netGex) / strongestWall;
+  const callStrengthRatio = strongestWall
+    ? Math.abs(callWall.netGex) / strongestWall
+    : 0;
+
+  const putStrengthRatio = strongestWall
+    ? Math.abs(putWall.netGex) / strongestWall
+    : 0;
 
   return {
     spot,
@@ -213,13 +228,13 @@ function buildMessage(symbol, a) {
 
   const supportTitle =
     a.putStrengthRatio < MIN_WALL_STRENGTH_RATIO
-      ? '🟥 دعم جاما ضعيف:'
-      : '🟥 دعم جاما قوي:';
+      ? '🟥 أقرب دعم جاما ضعيف:'
+      : '🟥 أقرب دعم جاما قوي:';
 
   const resistanceTitle =
     a.callStrengthRatio < MIN_WALL_STRENGTH_RATIO
-      ? '🟩 مقاومة جاما ضعيفة:'
-      : '🟩 مقاومة جاما قوية:';
+      ? '🟩 أقرب مقاومة جاما ضعيفة:'
+      : '🟩 أقرب مقاومة جاما قوية:';
 
   return `🧠 ST GEX Analysis
 
@@ -245,7 +260,7 @@ ${supportTitle}
 📍 حالة السعر:
 ${directionText}
 
-📊 أقوى مستويات الجاما:
+📊 أقوى مستويات الجاما القريبة:
 ${buildMiniChart(a.topLevels)}
 
 ⚠️ القراءة:
