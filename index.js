@@ -19,10 +19,11 @@ const WATCHLIST = ['SPY', 'QQQ', 'TSLA', 'NVDA', 'AAPL', 'AMD'];
 
 const EXPIRATION_MODE = 'ALL';
 
-const AUTO_SCAN_MS = 5 * 60 * 1000;
+// تخفيف الاستهلاك
+const AUTO_SCAN_MS = 10 * 60 * 1000;
 const USER_COOLDOWN_MS = 15 * 1000;
-const CACHE_MS = 60 * 1000;
-const ALERT_COOLDOWN_MS = 10 * 60 * 1000;
+const CACHE_MS = 5 * 60 * 1000;
+const ALERT_COOLDOWN_MS = 20 * 60 * 1000;
 
 const NEAR_SPOT_RANGE = 0.15;
 const MIN_WALL_STRENGTH_RATIO = 0.20;
@@ -30,6 +31,8 @@ const MIN_WALL_STRENGTH_RATIO = 0.20;
 const userCooldown = new Map();
 const gexCache = new Map();
 const lastAlert = new Map();
+
+let autoScanIndex = 0;
 
 function isAdmin(userId) {
   return String(userId) === String(ADMIN_CHAT_ID);
@@ -85,6 +88,9 @@ async function remainingDays(userId) {
   const ms = Number(data.expires_at) - Date.now();
   return Math.max(0, Math.ceil(ms / (1000 * 60 * 60 * 24)));
 }
+// =====================
+// Admin Commands
+// =====================
 
 bot.onText(/^\/create\s+(\d+)$/i, async (msg, match) => {
   if (!isAdmin(msg.from.id)) return;
@@ -218,6 +224,9 @@ async function activateCode(code, userId, chatId) {
 
   return true;
 }
+// =====================
+// Massive API
+// =====================
 
 async function getOptionSnapshot(symbol) {
   let url = `https://api.massive.com/v3/snapshot/options/${symbol}`;
@@ -237,7 +246,8 @@ async function getOptionSnapshot(symbol) {
       url = null;
     }
 
-    if (results.length >= 1500) break;
+    // حماية من الاستهلاك الزائد
+    if (results.length >= 1000) break;
   }
 
   return { results };
@@ -355,6 +365,9 @@ function calculateGex(data) {
     putStrengthRatio: strongestWall ? Math.abs(putWall.netGex) / strongestWall : 0
   };
 }
+// =====================
+// GEX Analysis
+// =====================
 
 async function analyzeGex(symbol) {
   const cacheKey = `${symbol}-${EXPIRATION_MODE}`;
@@ -391,12 +404,22 @@ function buildSummary(a) {
   const supportStrong = a.putStrengthRatio >= MIN_WALL_STRENGTH_RATIO;
   const resistanceStrong = a.callStrengthRatio >= MIN_WALL_STRENGTH_RATIO;
 
-  if (putDistance !== null && putDistance <= 0 && Math.abs(putDistance) <= 1.0 && supportStrong) {
+  if (
+    putDistance !== null &&
+    putDistance <= 0 &&
+    Math.abs(putDistance) <= 1.0 &&
+    supportStrong
+  ) {
     return `السهم يتمسك فوق دعم جاما قوي ${a.putWall.strike}
 وأول مقاومة مؤثرة عند ${a.callWall.strike}`;
   }
 
-  if (callDistance !== null && callDistance >= 0 && callDistance <= 1.0 && resistanceStrong) {
+  if (
+    callDistance !== null &&
+    callDistance >= 0 &&
+    callDistance <= 1.0 &&
+    resistanceStrong
+  ) {
     return `السهم قريب جدًا من مقاومة جاما قوية ${a.callWall.strike}
 وقد يواجه تهدئة أو رفض سعري`;
   }
@@ -464,6 +487,9 @@ ${buildSummary(a)}
 
 ليست توصية شراء أو بيع.`;
 }
+// =====================
+// Manual User Requests
+// =====================
 
 bot.on('message', async (msg) => {
   try {
@@ -509,55 +535,62 @@ bot.on('message', async (msg) => {
   }
 });
 
+// =====================
+// Auto Scan
+// =====================
+
 async function autoScan() {
   if (!ADMIN_CHAT_ID) return;
+  if (!WATCHLIST.length) return;
 
-  for (const symbol of WATCHLIST) {
-    try {
-      const a = await analyzeGex(symbol);
+  const symbol = WATCHLIST[autoScanIndex % WATCHLIST.length];
+  autoScanIndex++;
 
-      if (!a.spot) continue;
+  try {
+    const a = await analyzeGex(symbol);
 
-      const callWallStrong = a.callStrengthRatio >= MIN_WALL_STRENGTH_RATIO;
-      const putWallStrong = a.putStrengthRatio >= MIN_WALL_STRENGTH_RATIO;
+    if (!a.spot) return;
 
-      const nearCall =
-        callWallStrong &&
-        Math.abs(a.spot - a.callWall.strike) / a.spot <= 0.005;
+    const callWallStrong = a.callStrengthRatio >= MIN_WALL_STRENGTH_RATIO;
+    const putWallStrong = a.putStrengthRatio >= MIN_WALL_STRENGTH_RATIO;
 
-      const nearPut =
-        putWallStrong &&
-        Math.abs(a.spot - a.putWall.strike) / a.spot <= 0.005;
+    const nearCall =
+      callWallStrong &&
+      Math.abs(a.spot - a.callWall.strike) / a.spot <= 0.005;
 
-      const nearFlip =
-        Math.abs(a.spot - a.flip.strike) / a.spot <= 0.005;
+    const nearPut =
+      putWallStrong &&
+      Math.abs(a.spot - a.putWall.strike) / a.spot <= 0.005;
 
-      if (!nearCall && !nearPut && !nearFlip) continue;
+    const nearFlip =
+      Math.abs(a.spot - a.flip.strike) / a.spot <= 0.005;
 
-      const reason = [
-        nearCall ? `🟩 قريب من مقاومة جاما قوية ${a.callWall.strike}` : null,
-        nearPut ? `🟥 قريب من دعم جاما قوي ${a.putWall.strike}` : null,
-        nearFlip ? `🎯 قريب من Gamma Flip ${a.flip.strike}` : null
-      ].filter(Boolean).join('\n');
+    if (!nearCall && !nearPut && !nearFlip) return;
 
-      const key = `${symbol}-${reason}`;
-      const last = lastAlert.get(key);
+    const reason = [
+      nearCall ? `🟩 قريب من مقاومة جاما قوية ${a.callWall.strike}` : null,
+      nearPut ? `🟥 قريب من دعم جاما قوي ${a.putWall.strike}` : null,
+      nearFlip ? `🎯 قريب من Gamma Flip ${a.flip.strike}` : null
+    ].filter(Boolean).join('\n');
 
-      if (last && Date.now() - last < ALERT_COOLDOWN_MS) continue;
+    const key = `${symbol}-${reason}`;
+    const last = lastAlert.get(key);
 
-      lastAlert.set(key, Date.now());
+    if (last && Date.now() - last < ALERT_COOLDOWN_MS) return;
 
-      await bot.sendMessage(
-        ADMIN_CHAT_ID,
-        `🚨 تنبيه تلقائي GEX\n\n${reason}\n\n${buildMessage(symbol, a)}`
-      );
-    } catch (err) {
-      console.error(`AUTO ERROR ${symbol}:`, err.response?.data || err.message);
-    }
+    lastAlert.set(key, Date.now());
+
+    await bot.sendMessage(
+      ADMIN_CHAT_ID,
+      `🚨 تنبيه تلقائي GEX\n\n${reason}\n\n${buildMessage(symbol, a)}`
+    );
+  } catch (err) {
+    console.error(`AUTO ERROR ${symbol}:`, err.response?.data || err.message);
   }
 }
-
-bot.sendMessage(ADMIN_CHAT_ID, '✅ ST GEX Bot اشتغل: اشتراكات + يدوي + تلقائي');
+// =====================
+// Market Time
+// =====================
 
 function isMarketOpenNY() {
   const now = new Date();
@@ -588,6 +621,17 @@ function isMarketOpenNY() {
   return totalMinutes >= marketOpen && totalMinutes <= marketClose;
 }
 
+// =====================
+// Start Bot
+// =====================
+
+bot.sendMessage(
+  ADMIN_CHAT_ID,
+  '✅ ST GEX Bot اشتغل: اشتراكات + يدوي + تلقائي مخفف الاستهلاك'
+).catch(err => {
+  console.error('START MESSAGE ERROR:', err.message);
+});
+
 setInterval(() => {
   if (isMarketOpenNY()) {
     autoScan();
@@ -599,3 +643,5 @@ setInterval(() => {
 if (isMarketOpenNY()) {
   autoScan();
 }
+
+console.log('🚀 ST GEX Stocks Bot Started');
