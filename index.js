@@ -19,9 +19,7 @@ const supabase = createClient(
 // ENV Settings
 // =====================
 
-const WATCHLIST = String(
-  process.env.SIGNAL_SYMBOLS || 'SPY,QQQ,TSLA,NVDA,AAPL,AMD'
-)
+const WATCHLIST = String(process.env.SIGNAL_SYMBOLS || 'SPY,QQQ,TSLA,NVDA,AAPL,AMD,AVGO,AMZN')
   .split(',')
   .map(x => x.trim().toUpperCase())
   .filter(Boolean);
@@ -41,6 +39,12 @@ const FLOW_LOOKBACK_MINUTES = Number(process.env.FLOW_LOOKBACK_MINUTES || 15);
 const FLOW_MAX_CONTRACTS = Number(process.env.FLOW_MAX_CONTRACTS || 8);
 const FLOW_TRADE_LIMIT = Number(process.env.FLOW_TRADE_LIMIT || 500);
 const FLOW_QUOTE_LIMIT = Number(process.env.FLOW_QUOTE_LIMIT || 500);
+
+// وقف فني
+const STOCK_BAR_MINUTES = Number(process.env.STOCK_BAR_MINUTES || 5);
+const STOCK_BARS_LOOKBACK_DAYS = Number(process.env.STOCK_BARS_LOOKBACK_DAYS || 5);
+const SWING_LEFT_RIGHT = Number(process.env.SWING_LEFT_RIGHT || 2);
+const TECH_STOP_BUFFER_PCT = Number(process.env.TECH_STOP_BUFFER_PCT || 0.0015);
 
 const userCooldown = new Map();
 const gexCache = new Map();
@@ -67,7 +71,6 @@ function fmt(n) {
 
 function fmtCompact(n) {
   if (n === null || n === undefined || Number.isNaN(Number(n))) return 'N/A';
-
   const num = Number(n);
   const abs = Math.abs(num);
 
@@ -90,17 +93,6 @@ function isValidSymbol(text) {
   return /^[A-Z]{1,6}$/.test(text);
 }
 
-function distancePercent(spot, strike) {
-  if (!spot || !strike) return null;
-  return ((strike - spot) / spot) * 100;
-}
-
-function fmtPercent(n) {
-  if (n === null || n === undefined || Number.isNaN(Number(n))) return 'N/A';
-  const sign = n > 0 ? '+' : '';
-  return `${sign}${Number(n).toFixed(2)}%`;
-}
-
 function safeNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -115,14 +107,19 @@ function pct(part, total) {
   return (part / total) * 100;
 }
 
+function distancePercent(spot, strike) {
+  if (!spot || !strike) return null;
+  return ((strike - spot) / spot) * 100;
+}
+
+function fmtPercent(n) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return 'N/A';
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${Number(n).toFixed(2)}%`;
+}
+
 function getContractTicker(item) {
-  return (
-    item.details?.ticker ||
-    item.ticker ||
-    item.symbol ||
-    item.contract_ticker ||
-    null
-  );
+  return item.details?.ticker || item.ticker || item.symbol || item.contract_ticker || null;
 }
 
 function getTradePrice(t) {
@@ -164,6 +161,21 @@ function getTodayISODateNY() {
   return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
+function getISODateDaysAgoNY(daysAgo) {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(d);
+
+  const get = type => parts.find(p => p.type === type)?.value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
 // =====================
 // Subscription
 // =====================
@@ -178,7 +190,6 @@ async function hasActiveSubscription(userId) {
     .single();
 
   if (error || !data) return false;
-
   return Number(data.expires_at) > Date.now();
 }
 
@@ -361,6 +372,33 @@ async function getOptionSnapshot(symbol) {
   return { results };
 }
 
+async function getStockBars(symbol) {
+  const to = getTodayISODateNY();
+  const from = getISODateDaysAgoNY(STOCK_BARS_LOOKBACK_DAYS);
+
+  const res = await axios.get(
+    `https://api.massive.com/v2/aggs/ticker/${encodeURIComponent(symbol)}/range/${STOCK_BAR_MINUTES}/minute/${from}/${to}`,
+    {
+      params: {
+        apiKey: API_KEY,
+        adjusted: true,
+        sort: 'asc',
+        limit: 5000
+      },
+      timeout: 20000
+    }
+  );
+
+  return (res.data.results || []).map(x => ({
+    time: x.t,
+    open: safeNumber(x.o),
+    high: safeNumber(x.h),
+    low: safeNumber(x.l),
+    close: safeNumber(x.c),
+    volume: safeNumber(x.v)
+  }));
+}
+
 async function getOptionTrades(optionsTicker) {
   const today = getTodayISODateNY();
 
@@ -400,6 +438,112 @@ async function getOptionQuotes(optionsTicker) {
 }
 
 // =====================
+// Technical Stop
+// =====================
+
+function isSwingLow(bars, i, lr) {
+  const low = bars[i].low;
+
+  for (let x = i - lr; x <= i + lr; x++) {
+    if (x === i) continue;
+    if (!bars[x]) return false;
+    if (bars[x].low <= low) return false;
+  }
+
+  return true;
+}
+
+function isSwingHigh(bars, i, lr) {
+  const high = bars[i].high;
+
+  for (let x = i - lr; x <= i + lr; x++) {
+    if (x === i) continue;
+    if (!bars[x]) return false;
+    if (bars[x].high >= high) return false;
+  }
+
+  return true;
+}
+
+function findLastSwingLow(bars, maxPrice = Infinity) {
+  for (let i = bars.length - 1 - SWING_LEFT_RIGHT; i >= SWING_LEFT_RIGHT; i--) {
+    if (isSwingLow(bars, i, SWING_LEFT_RIGHT) && bars[i].low < maxPrice) {
+      return bars[i].low;
+    }
+  }
+
+  const recent = bars.slice(-30).filter(b => b.low < maxPrice);
+  if (!recent.length) return null;
+
+  return Math.min(...recent.map(b => b.low));
+}
+
+function findLastSwingHigh(bars, minPrice = 0) {
+  for (let i = bars.length - 1 - SWING_LEFT_RIGHT; i >= SWING_LEFT_RIGHT; i--) {
+    if (isSwingHigh(bars, i, SWING_LEFT_RIGHT) && bars[i].high > minPrice) {
+      return bars[i].high;
+    }
+  }
+
+  const recent = bars.slice(-30).filter(b => b.high > minPrice);
+  if (!recent.length) return null;
+
+  return Math.max(...recent.map(b => b.high));
+}
+
+function calculateTechnicalStop(bars, bias, entry, spot) {
+  if (!bars || bars.length < 20 || !entry) {
+    return {
+      price: null,
+      source: 'غير متاح',
+      valid: false
+    };
+  }
+
+  if (bias === 'CALL') {
+    const swingLow = findLastSwingLow(bars, entry);
+
+    if (!swingLow) {
+      return { price: null, source: 'لم يتم العثور على قاع فني', valid: false };
+    }
+
+    const stop = swingLow * (1 - TECH_STOP_BUFFER_PCT);
+    const riskPct = Math.abs((entry - stop) / entry) * 100;
+
+    return {
+      price: stop,
+      source: 'آخر قاع فني قبل الاختراق',
+      valid: riskPct <= 4,
+      riskPct
+    };
+  }
+
+  if (bias === 'PUT') {
+    const swingHigh = findLastSwingHigh(bars, entry);
+
+    if (!swingHigh) {
+      return { price: null, source: 'لم يتم العثور على قمة فنية', valid: false };
+    }
+
+    const stop = swingHigh * (1 + TECH_STOP_BUFFER_PCT);
+    const riskPct = Math.abs((stop - entry) / entry) * 100;
+
+    return {
+      price: stop,
+      source: 'آخر قمة فنية قبل الكسر',
+      valid: riskPct <= 4,
+      riskPct
+    };
+  }
+
+  return {
+    price: null,
+    source: 'Neutral',
+    valid: false
+  };
+}
+
+// =====================
 // GEX Core
 // =====================
 
@@ -424,43 +568,26 @@ function selectTopLevels(rows, spot, side, count = 3) {
   if (!rows.length || !spot) return [];
 
   const maxAbs = Math.max(...rows.map(r => Math.abs(r.netGex)), 1);
-  const minStrength = maxAbs * 0.05;
+  const minStrength = maxAbs * 0.03;
 
   let filtered;
 
   if (side === 'resistance') {
     filtered = rows
-      .filter(r => r.strike >= spot && r.netGex > 0 && Math.abs(r.netGex) >= minStrength)
+      .filter(r => r.strike >= spot && Math.abs(r.netGex) >= minStrength)
       .sort((a, b) => a.strike - b.strike);
   } else {
     filtered = rows
-      .filter(r => r.strike <= spot && r.netGex < 0 && Math.abs(r.netGex) >= minStrength)
+      .filter(r => r.strike <= spot && Math.abs(r.netGex) >= minStrength)
       .sort((a, b) => b.strike - a.strike);
   }
 
-  if (filtered.length >= count) return filtered.slice(0, count);
-
-  const fallback = side === 'resistance'
-    ? rows.filter(r => r.strike >= spot).sort((a, b) => Math.abs(b.netGex) - Math.abs(a.netGex))
-    : rows.filter(r => r.strike <= spot).sort((a, b) => Math.abs(b.netGex) - Math.abs(a.netGex));
-
-  const merged = [...filtered];
-
-  for (const r of fallback) {
-    if (!merged.find(x => x.strike === r.strike)) merged.push(r);
-    if (merged.length >= count) break;
-  }
-
-  return merged.slice(0, count);
+  return filtered.slice(0, count);
 }
 
 function calculateNewPositions(volume, oi) {
   if (!volume || !oi) {
-    return {
-      label: 'غير واضح',
-      ratio: 0,
-      score: 0
-    };
+    return { label: 'غير واضح', ratio: 0, score: 0 };
   }
 
   const ratio = volume / oi;
@@ -478,13 +605,11 @@ function calculateGex(data) {
   const flowContracts = [];
 
   let spot = null;
-
   let totalGex = 0;
   let totalDex = 0;
 
   let callVolume = 0;
   let putVolume = 0;
-
   let totalVolume = 0;
   let totalOI = 0;
 
@@ -516,8 +641,7 @@ function calculateGex(data) {
         callVolume: 0,
         putVolume: 0,
         volume: 0,
-        oi: 0,
-        contracts: []
+        oi: 0
       };
     }
 
@@ -552,16 +676,6 @@ function calculateGex(data) {
     totalVolume += volume;
     totalOI += oi;
 
-    byStrike[strike].contracts.push({
-      ticker,
-      type,
-      strike,
-      gamma,
-      delta,
-      oi,
-      volume
-    });
-
     if (ticker && isNearSpot(strike, spot)) {
       flowContracts.push({
         ticker,
@@ -586,8 +700,15 @@ function calculateGex(data) {
   const resistances = selectTopLevels(sourceRows, spot, 'resistance', 3);
   const supports = selectTopLevels(sourceRows, spot, 'support', 3);
 
-  const callWall = resistances[0] || sourceRows.reduce((a, b) => (b.netGex > a.netGex ? b : a));
-  const putWall = supports[0] || sourceRows.reduce((a, b) => (b.netGex < a.netGex ? b : a));
+  const callWall =
+    resistances[0] ||
+    sourceRows.filter(r => r.strike >= spot).sort((a, b) => Math.abs(b.netGex) - Math.abs(a.netGex))[0] ||
+    sourceRows[0];
+
+  const putWall =
+    supports[0] ||
+    sourceRows.filter(r => r.strike <= spot).sort((a, b) => Math.abs(b.netGex) - Math.abs(a.netGex))[0] ||
+    sourceRows[0];
 
   const flip = sourceRows.reduce((a, b) =>
     Math.abs(b.netGex) < Math.abs(a.netGex) ? b : a
@@ -643,8 +764,8 @@ function calculateGex(data) {
 
     flowCandidates,
 
-    callStrengthRatio: strongestWall ? Math.abs(callWall.netGex) / strongestWall : 0,
-    putStrengthRatio: strongestWall ? Math.abs(putWall.netGex) / strongestWall : 0
+    callStrengthRatio: Math.abs(callWall.netGex) / strongestWall,
+    putStrengthRatio: Math.abs(putWall.netGex) / strongestWall
   };
 }
 
@@ -659,11 +780,8 @@ function findNearestQuote(tradeTs, quotesAsc) {
     const qTs = getTs(q);
     if (!qTs) continue;
 
-    if (qTs <= tradeTs) {
-      nearest = q;
-    } else {
-      break;
-    }
+    if (qTs <= tradeTs) nearest = q;
+    else break;
   }
 
   return nearest || quotesAsc[quotesAsc.length - 1] || null;
@@ -757,35 +875,16 @@ async function calculateRealAskBidFlow(contracts) {
 }
 
 // =====================
-// Analysis
+// Score + Trade Plan
 // =====================
 
-async function analyzeGex(symbol) {
-  const cacheKey = `${symbol}-${EXPIRATION_MODE}`;
-  const cached = gexCache.get(cacheKey);
-
-  if (cached && Date.now() - cached.time < CACHE_MS) {
-    return cached.data;
-  }
-
-  const data = await getOptionSnapshot(symbol);
-  const analysis = calculateGex(data);
-
-  analysis.realFlow = await calculateRealAskBidFlow(analysis.flowCandidates);
-
-  analysis.scoreData = calculateScore(analysis);
-
-  gexCache.set(cacheKey, {
-    time: Date.now(),
-    data: analysis
-  });
-
-  return analysis;
+function hasValidRealFlow(a) {
+  return (
+    a.realFlow?.enabled &&
+    a.realFlow.contractsChecked > 0 &&
+    (a.realFlow.askVolume + a.realFlow.bidVolume + a.realFlow.neutralVolume) > 0
+  );
 }
-
-// =====================
-// Score + Message
-// =====================
 
 function calculateScore(a) {
   let callScore = 0;
@@ -793,12 +892,13 @@ function calculateScore(a) {
   const reasons = [];
 
   const aboveFlip = a.spot > a.flip.strike;
+  const flipDistance = Math.abs(distancePercent(a.spot, a.flip.strike) || 0);
 
   if (aboveFlip) {
-    callScore += 2;
+    callScore += 3;
     reasons.push('✅ السعر فوق Gamma Flip');
   } else {
-    putScore += 2;
+    putScore += 3;
     reasons.push('✅ السعر تحت Gamma Flip');
   }
 
@@ -818,7 +918,7 @@ function calculateScore(a) {
     reasons.push('✅ Put Flow أعلى من Call Flow');
   }
 
-  if (a.realFlow?.enabled && (a.realFlow.askVolume + a.realFlow.bidVolume) > 0) {
+  if (hasValidRealFlow(a)) {
     if (a.realFlow.askPct > a.realFlow.bidPct + 10) {
       callScore += 2;
       reasons.push('✅ Ask Flow أعلى من Bid Flow');
@@ -842,18 +942,146 @@ function calculateScore(a) {
     reasons.push('✅ Gamma Regime سلبي');
   }
 
-  const bias = callScore >= putScore ? 'CALL' : 'PUT';
-  const raw = Math.max(callScore, putScore);
-  const confidence = clamp(raw, 1, 10);
+  let bias = 'NEUTRAL';
+  let confidence = Math.max(callScore, putScore);
+
+  if (Math.abs(callScore - putScore) >= 3 && confidence >= 6) {
+    bias = callScore > putScore ? 'CALL' : 'PUT';
+  }
+
+  if (flipDistance >= 5 && callScore > putScore && !aboveFlip) {
+    confidence = Math.max(1, confidence - 2);
+    reasons.push('⚠️ السعر بعيد وتحت Gamma Flip، تم تخفيض الثقة');
+  }
+
+  if (flipDistance >= 5 && putScore > callScore && aboveFlip) {
+    confidence = Math.max(1, confidence - 2);
+    reasons.push('⚠️ السعر بعيد وفوق Gamma Flip، تم تخفيض الثقة');
+  }
+
+  if (confidence < 6) {
+    bias = 'NEUTRAL';
+  }
 
   return {
     bias,
     callScore,
     putScore,
-    confidence,
+    confidence: clamp(confidence, 1, 10),
     reasons
   };
 }
+
+function extendTarget(level2, level3) {
+  if (!level2 || !level3) return 'N/A';
+  const step = Math.abs(Number(level3) - Number(level2));
+  if (!step) return 'N/A';
+  return Number(level3) + step;
+}
+
+function buildTradePlan(a) {
+  const score = a.scoreData;
+
+  const r1 = a.resistances[0];
+  const r2 = a.resistances[1];
+  const r3 = a.resistances[2];
+
+  const s1 = a.supports[0];
+  const s2 = a.supports[1];
+  const s3 = a.supports[2];
+
+  if (score.bias === 'CALL') {
+    const entry = r1?.strike || null;
+    const tp1 = r2?.strike || r1?.strike || 'N/A';
+    const tp2 = r3?.strike || 'N/A';
+    const tp3 = r2 && r3 ? extendTarget(r2.strike, r3.strike) : 'N/A';
+
+    return {
+      direction: '🟢 CALL BIAS',
+      entryText: entry ? `اختراق ${entry} والثبات فوقه` : 'غير واضح',
+      entry,
+      tp1,
+      tp2,
+      tp3,
+      alt1: s1?.strike || 'N/A',
+      alt2: s2?.strike || 'N/A'
+    };
+  }
+
+  if (score.bias === 'PUT') {
+    const entry = s1?.strike || null;
+    const tp1 = s2?.strike || s1?.strike || 'N/A';
+    const tp2 = s3?.strike || 'N/A';
+    const tp3 = s2 && s3 ? Number(s3.strike) - Math.abs(Number(s2.strike) - Number(s3.strike)) : 'N/A';
+
+    return {
+      direction: '🔴 PUT BIAS',
+      entryText: entry ? `كسر ${entry} والثبات تحته` : 'غير واضح',
+      entry,
+      tp1,
+      tp2,
+      tp3,
+      alt1: r1?.strike || 'N/A',
+      alt2: r2?.strike || 'N/A'
+    };
+  }
+
+  return {
+    direction: '⚪ NEUTRAL',
+    entryText: 'لا يوجد دخول واضح بسبب تعارض البيانات',
+    entry: null,
+    tp1: 'N/A',
+    tp2: 'N/A',
+    tp3: 'N/A',
+    alt1: 'N/A',
+    alt2: 'N/A'
+  };
+}
+
+// =====================
+// Analysis
+// =====================
+
+async function analyzeGex(symbol) {
+  const cacheKey = `${symbol}-${EXPIRATION_MODE}`;
+  const cached = gexCache.get(cacheKey);
+
+  if (cached && Date.now() - cached.time < CACHE_MS) {
+    return cached.data;
+  }
+
+  const [data, bars] = await Promise.all([
+    getOptionSnapshot(symbol),
+    getStockBars(symbol).catch(err => {
+      console.error(`BARS ERROR ${symbol}:`, err.response?.data || err.message);
+      return [];
+    })
+  ]);
+
+  const analysis = calculateGex(data);
+
+  analysis.realFlow = await calculateRealAskBidFlow(analysis.flowCandidates);
+  analysis.scoreData = calculateScore(analysis);
+  analysis.tradePlan = buildTradePlan(analysis);
+
+  analysis.technicalStop = calculateTechnicalStop(
+    bars,
+    analysis.scoreData.bias,
+    analysis.tradePlan.entry,
+    analysis.spot
+  );
+
+  gexCache.set(cacheKey, {
+    time: Date.now(),
+    data: analysis
+  });
+
+  return analysis;
+}
+
+// =====================
+// Message
+// =====================
 
 function buildMiniChart(levels) {
   return levels
@@ -862,17 +1090,6 @@ function buildMiniChart(levels) {
       return `${icon} سترايك ${l.strike} | ${fmt(l.netGex)}`;
     })
     .join('\n');
-}
-
-function buildLevelsList(levels, prefix) {
-  if (!levels || !levels.length) return 'لا توجد مستويات كافية';
-
-  return levels.map((l, i) => {
-    const dist = fmtPercent(distancePercent(l.spot || null, l.strike));
-    return `${prefix}${i + 1}️⃣ ${l.strike}
-القوة: ${l.netGex >= 0 ? '+' : ''}${fmt(l.netGex)}
-المسافة: ${dist}`;
-  }).join('\n\n');
 }
 
 function buildResistanceList(a) {
@@ -886,7 +1103,7 @@ function buildResistanceList(a) {
 }
 
 function buildSupportList(a) {
-  if (!a.supports.length) return 'لا توجد دعوم كافية';
+  if (!a.supports.length) return 'لا توجد مستويات سفلية كافية';
 
   return a.supports.map((l, i) => {
     return `S${i + 1}️⃣ ${l.strike}
@@ -895,63 +1112,48 @@ function buildSupportList(a) {
   }).join('\n\n');
 }
 
-function buildSummary(a) {
-  const score = a.scoreData;
-  const r1 = a.resistances[0];
-  const r2 = a.resistances[1];
-  const r3 = a.resistances[2];
+function buildStopText(a) {
+  if (a.scoreData.bias === 'NEUTRAL') return 'لا يوجد وقف لأن الحالة Neutral';
 
-  const s1 = a.supports[0];
-  const s2 = a.supports[1];
-  const s3 = a.supports[2];
-
-  if (score.bias === 'CALL') {
-    return {
-      direction: '🟢 CALL BIAS',
-      entry: r1 ? `اختراق ${r1.strike} والثبات فوقه` : 'غير واضح',
-      tp1: r2?.strike || r1?.strike || 'N/A',
-      tp2: r3?.strike || 'N/A',
-      tp3: r3 ? Number(r3.strike) : 'N/A',
-      stop: s1 ? `كسر ${s1.strike}` : 'غير واضح',
-      alt1: s2?.strike || 'N/A',
-      alt2: s3?.strike || 'N/A'
-    };
+  if (!a.technicalStop?.price) {
+    return `غير متاح
+📌 السبب: ${a.technicalStop?.source || 'لا توجد شموع كافية'}`;
   }
 
-  return {
-    direction: '🔴 PUT BIAS',
-    entry: s1 ? `كسر ${s1.strike} والثبات تحته` : 'غير واضح',
-    tp1: s2?.strike || s1?.strike || 'N/A',
-    tp2: s3?.strike || 'N/A',
-    tp3: s3 ? Number(s3.strike) : 'N/A',
-    stop: r1 ? `اختراق ${r1.strike}` : 'غير واضح',
-    alt1: r2?.strike || 'N/A',
-    alt2: r3?.strike || 'N/A'
-  };
+  return `${fmtPrice(a.technicalStop.price)}
+📌 ${a.technicalStop.source}
+📏 المخاطرة الفنية: ${fmtPercent(a.technicalStop.riskPct || 0)}`;
+}
+
+function buildFlowText(a) {
+  if (hasValidRealFlow(a)) {
+    return `🟢 Ask Flow: ${fmtPercent(a.realFlow.askPct)}
+🔴 Bid Flow: ${fmtPercent(a.realFlow.bidPct)}
+⚪ Neutral: ${fmtPercent(a.realFlow.neutralPct)}
+📌 محسوبة من آخر ${FLOW_LOOKBACK_MINUTES} دقيقة على ${a.realFlow.contractsChecked} عقود`;
+  }
+
+  return `🟢 Ask/Bid Flow:
+غير متاح حاليًا
+
+📌 قد يظهر 0 إذا كان السوق مغلق أو لا توجد Trades/Quotes كافية خلال آخر ${FLOW_LOOKBACK_MINUTES} دقيقة`;
 }
 
 function buildMessage(symbol, a) {
-  const aboveFlip = a.spot > a.flip.strike;
   const score = a.scoreData;
-  const quick = buildSummary(a);
+  const plan = a.tradePlan;
 
   const r1 = a.resistances[0];
   const s1 = a.supports[0];
 
-  const flowText = a.realFlow?.enabled
-    ? `🟢 Ask Flow: ${fmtPercent(a.realFlow.askPct)}
-🔴 Bid Flow: ${fmtPercent(a.realFlow.bidPct)}
-⚪ Neutral: ${fmtPercent(a.realFlow.neutralPct)}
-📌 محسوبة من آخر ${FLOW_LOOKBACK_MINUTES} دقيقة على ${a.realFlow.contractsChecked} عقود`
-    : `🟢 Ask Flow: غير مفعل
-🔴 Bid Flow: غير مفعل`;
+  const gammaIcon = a.gammaRegime === 'Positive Gamma' ? '🟢' : '🔴';
 
   const controller =
     score.bias === 'CALL'
       ? 'المشترون'
-      : 'البائعون';
-
-  const gammaIcon = a.gammaRegime === 'Positive Gamma' ? '🟢' : '🔴';
+      : score.bias === 'PUT'
+        ? 'البائعون'
+        : 'غير واضح';
 
   return `🚨 ST Smart Flow Alert
 
@@ -962,18 +1164,18 @@ function buildMessage(symbol, a) {
 🚀 الخلاصة السريعة
 ━━━━━━━━━━━━━━
 
-📊 الاتجاه: ${quick.direction}
+📊 الاتجاه: ${plan.direction}
 🔥 الثقة: ${fmt(score.confidence)} / 10
 
 📍 الدخول:
-${quick.entry}
+${plan.entryText}
 
-🎯 TP1: ${quick.tp1}
-🎯 TP2: ${quick.tp2}
-🎯 TP3: ${quick.tp3}
+🎯 TP1: ${plan.tp1}
+🎯 TP2: ${plan.tp2}
+🎯 TP3: ${plan.tp3}
 
-🛑 الوقف:
-${quick.stop}
+🛑 الوقف الفني:
+${buildStopText(a)}
 
 ━━━━━━━━━━━━━━
 🧠 حالة السوق
@@ -999,7 +1201,7 @@ Volume/OI: ${fmt(a.newPositions.ratio)}x
 🟢 Call Flow: ${fmtPercent(a.callFlowPct)}
 🔴 Put Flow: ${fmtPercent(a.putFlowPct)}
 
-${flowText}
+${buildFlowText(a)}
 
 👑 الطرف المسيطر:
 ${controller}
@@ -1014,7 +1216,7 @@ ${fmt(score.confidence)} / 10
 ${buildResistanceList(a)}
 
 ━━━━━━━━━━━━━━
-🟥 دعوم الجاما
+🟥 مستويات جاما سفلية
 ━━━━━━━━━━━━━━
 
 ${buildSupportList(a)}
@@ -1048,21 +1250,21 @@ ${score.reasons.join('\n')}
 
 في حال فشل الاتجاه الحالي:
 
-🎯 Level 1: ${quick.alt1}
-🎯 Level 2: ${quick.alt2}
+🎯 Level 1: ${plan.alt1}
+🎯 Level 2: ${plan.alt2}
 
 ━━━━━━━━━━━━━━
 📌 القرار النهائي
 ━━━━━━━━━━━━━━
 
-${quick.direction}
+${plan.direction}
 📊 Score: ${fmt(score.confidence)} / 10
 
 ⚠️ ليست توصية شراء أو بيع`;
 }
 
 // =====================
-// Manual User Requests
+// Manual Requests
 // =====================
 
 bot.on('message', async (msg) => {
@@ -1139,13 +1341,13 @@ async function autoScan() {
     const nearFlip =
       Math.abs(a.spot - a.flip.strike) / a.spot <= 0.005;
 
-    const strongScore = a.scoreData.confidence >= 7;
+    const strongScore = a.scoreData.confidence >= 7 && a.scoreData.bias !== 'NEUTRAL';
 
     if (!nearResistance && !nearSupport && !nearFlip && !strongScore) return;
 
     const reason = [
       nearResistance ? `🟩 قريب من مقاومة جاما ${r1.strike}` : null,
-      nearSupport ? `🟥 قريب من دعم جاما ${s1.strike}` : null,
+      nearSupport ? `🟥 قريب من مستوى جاما سفلي ${s1.strike}` : null,
       nearFlip ? `🎯 قريب من Gamma Flip ${a.flip.strike}` : null,
       strongScore ? `🔥 Score قوي ${fmt(a.scoreData.confidence)} / 10` : null
     ].filter(Boolean).join('\n');
@@ -1181,7 +1383,7 @@ function isMarketOpenNY() {
     weekday: 'short'
   }).formatToParts(now);
 
-  const get = (type) => nyTime.find(p => p.type === type)?.value;
+  const get = type => nyTime.find(p => p.type === type)?.value;
 
   const day = get('weekday');
   const hour = Number(get('hour'));
@@ -1203,7 +1405,7 @@ function isMarketOpenNY() {
 
 bot.sendMessage(
   ADMIN_CHAT_ID,
-  '✅ ST Smart Flow Bot اشتغل: اشتراكات + يدوي + تلقائي + DEX + Flow'
+  '✅ ST Smart Flow Bot اشتغل: وقف فني + Neutral + DEX + Flow'
 ).catch(err => {
   console.error('START MESSAGE ERROR:', err.message);
 });
