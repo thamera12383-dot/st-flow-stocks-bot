@@ -1331,7 +1331,22 @@ bot.on('message', async (msg) => {
 
       const analysis = await analyzeGex(text);
 
-      await bot.sendMessage(chatId, buildMessage(text, analysis));
+      const reportText = buildMessage(text, analysis);
+
+await bot.sendMessage(
+  chatId,
+  reportText
+);
+
+if (
+  process.env.DECISION_GROUP_ID &&
+  String(chatId) !== String(process.env.DECISION_GROUP_ID)
+) {
+  await bot.sendMessage(
+    process.env.DECISION_GROUP_ID,
+    reportText
+  );
+}
     } finally {
       activeManualScans.delete(scanKey);
     }
