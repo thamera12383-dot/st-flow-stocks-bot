@@ -1338,7 +1338,10 @@ await bot.sendMessage(
   reportText
 );
 
-if (process.env.DECISION_GROUP_ID) {
+if (
+  process.env.DECISION_GROUP_ID &&
+  String(chatId) !== String(process.env.DECISION_GROUP_ID)
+) {
   await bot.sendMessage(
     process.env.DECISION_GROUP_ID,
     reportText
