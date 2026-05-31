@@ -5,7 +5,15 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+const bot = new TelegramBot(process.env.BOT_TOKEN, {
+  polling: {
+    interval: 300,
+    autoStart: true,
+    params: {
+      timeout: 10
+    }
+  }
+});
 
 const API_KEY = process.env.MASSIVE_API_KEY;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
@@ -40,7 +48,6 @@ const FLOW_MAX_CONTRACTS = Number(process.env.FLOW_MAX_CONTRACTS || 8);
 const FLOW_TRADE_LIMIT = Number(process.env.FLOW_TRADE_LIMIT || 500);
 const FLOW_QUOTE_LIMIT = Number(process.env.FLOW_QUOTE_LIMIT || 500);
 
-// وقف فني
 const STOCK_BAR_MINUTES = Number(process.env.STOCK_BAR_MINUTES || 5);
 const STOCK_BARS_LOOKBACK_DAYS = Number(process.env.STOCK_BARS_LOOKBACK_DAYS || 5);
 const SWING_LEFT_RIGHT = Number(process.env.SWING_LEFT_RIGHT || 2);
@@ -49,6 +56,12 @@ const TECH_STOP_BUFFER_PCT = Number(process.env.TECH_STOP_BUFFER_PCT || 0.0015);
 const userCooldown = new Map();
 const gexCache = new Map();
 const lastAlert = new Map();
+
+// ✅ منع تكرار معالجة نفس رسالة تيليجرام
+const processedMessages = new Set();
+
+// ✅ منع تشغيل فحصين لنفس السهم بنفس اللحظة
+const activeManualScans = new Set();
 
 let autoScanIndex = 0;
 
@@ -175,7 +188,6 @@ function getISODateDaysAgoNY(daysAgo) {
   const get = type => parts.find(p => p.type === type)?.value;
   return `${get('year')}-${get('month')}-${get('day')}`;
 }
-
 // =====================
 // Subscription
 // =====================
@@ -436,7 +448,6 @@ async function getOptionQuotes(optionsTicker) {
 
   return res.data.results || [];
 }
-
 // =====================
 // Technical Stop
 // =====================
@@ -768,7 +779,6 @@ function calculateGex(data) {
     putStrengthRatio: Math.abs(putWall.netGex) / strongestWall
   };
 }
-
 // =====================
 // Real Ask/Bid Flow
 // =====================
@@ -1078,7 +1088,6 @@ async function analyzeGex(symbol) {
 
   return analysis;
 }
-
 // =====================
 // Message
 // =====================
@@ -1268,6 +1277,15 @@ ${plan.direction}
 // =====================
 
 bot.on('message', async (msg) => {
+  const msgKey = `${msg.chat.id}-${msg.message_id}`;
+
+  if (processedMessages.has(msgKey)) return;
+  processedMessages.add(msgKey);
+
+  setTimeout(() => {
+    processedMessages.delete(msgKey);
+  }, 5 * 60 * 1000);
+
   try {
     if (!msg.text) return;
     if (msg.text.startsWith('/')) return;
@@ -1283,34 +1301,45 @@ bot.on('message', async (msg) => {
 
     if (!isValidSymbol(text)) return;
 
-    const active = await hasActiveSubscription(userId);
+    const scanKey = `${chatId}-${text}`;
 
-    if (!active) {
-      return bot.sendMessage(
-        chatId,
-        '❌ لا تملك اشتراك فعال.\n\nراسل الإدارة للحصول على كود تفعيل.'
-      );
+    if (activeManualScans.has(scanKey)) {
+      return;
     }
 
-    const last = userCooldown.get(chatId);
+    activeManualScans.add(scanKey);
 
-    if (last && Date.now() - last < USER_COOLDOWN_MS) {
-      return bot.sendMessage(chatId, '⏳ انتظر 15 ثانية قبل طلب سهم جديد.');
+    try {
+      const active = await hasActiveSubscription(userId);
+
+      if (!active) {
+        return bot.sendMessage(
+          chatId,
+          '❌ لا تملك اشتراك فعال.\n\nراسل الإدارة للحصول على كود تفعيل.'
+        );
+      }
+
+      const last = userCooldown.get(chatId);
+
+      if (last && Date.now() - last < USER_COOLDOWN_MS) {
+        return bot.sendMessage(chatId, '⏳ انتظر 15 ثانية قبل طلب سهم جديد.');
+      }
+
+      userCooldown.set(chatId, Date.now());
+
+      await bot.sendMessage(chatId, `⏳ جاري تحليل Smart Flow لـ ${text}...`);
+
+      const analysis = await analyzeGex(text);
+
+      await bot.sendMessage(chatId, buildMessage(text, analysis));
+    } finally {
+      activeManualScans.delete(scanKey);
     }
-
-    userCooldown.set(chatId, Date.now());
-
-    await bot.sendMessage(chatId, `⏳ جاري تحليل Smart Flow لـ ${text}...`);
-
-    const analysis = await analyzeGex(text);
-
-    await bot.sendMessage(chatId, buildMessage(text, analysis));
   } catch (err) {
     console.error('MANUAL ERROR:', err.response?.data || err.message);
     await bot.sendMessage(msg.chat.id, '❌ لم أستطع جلب بيانات GEX لهذا الرمز.');
   }
 });
-
 // =====================
 // Auto Scan
 // =====================
