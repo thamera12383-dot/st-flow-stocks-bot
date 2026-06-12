@@ -24,6 +24,22 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const GAMMA_API_SECRET = process.env.GAMMA_API_SECRET;
 
+const RESTART_PASSWORD = process.env.RESTART_PASSWORD || '0126188';
+
+app.use(express.json());
+
+app.post('/restart', (req, res) => {
+  if (req.body?.password !== RESTART_PASSWORD) {
+    return res.status(403).json({ ok: false, error: 'Forbidden' });
+  }
+
+  res.status(200).json({ ok: true, message: 'Restart command received' });
+
+  setTimeout(() => {
+    process.exit(1);
+  }, 1000);
+});
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
