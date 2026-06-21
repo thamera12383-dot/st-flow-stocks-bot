@@ -1463,59 +1463,112 @@ function getIntradayBalance(a) {
 }
 
 function calculateGammaQuality(a) {
-  const resistances = (a.resistances || [])
-    .filter(x => x && Number.isFinite(Number(x.netGex)))
-    .map(x => Math.abs(Number(x.netGex)));
+  const r1 = a.resistances?.[0] || null;
+  const r2 = a.resistances?.[1] || null;
+  const r3 = a.resistances?.[2] || null;
 
-  const supports = (a.supports || [])
-    .filter(x => x && Number.isFinite(Number(x.netGex)))
-    .map(x => Math.abs(Number(x.netGex)));
+  const s1 = a.supports?.[0] || null;
+  const s2 = a.supports?.[1] || null;
+  const s3 = a.supports?.[2] || null;
 
-  const strongestResistance = resistances.length ? Math.max(...resistances) : 0;
-  const strongestSupport = supports.length ? Math.max(...supports) : 0;
+  const bias = a.scoreData?.bias;
 
-  if (!strongestResistance || !strongestSupport || !a.scoreData?.bias) {
+  if (!bias || bias === 'NEUTRAL') {
     return {
       ratio: 0,
       text: '⚪ قوة الجاما: غير واضحة'
     };
   }
 
-  let ratio = 0;
+  const abs = x => Math.abs(Number(x?.netGex || 0));
 
-  if (a.scoreData.bias === 'CALL') {
-    ratio = strongestSupport / strongestResistance;
-  } else if (a.scoreData.bias === 'PUT') {
-    ratio = strongestResistance / strongestSupport;
-  } else {
+  const r1Power = abs(r1);
+  const r2Power = abs(r2);
+  const r3Power = abs(r3);
+
+  const s1Power = abs(s1);
+  const s2Power = abs(s2);
+  const s3Power = abs(s3);
+
+  const strongestResistance = Math.max(r1Power, r2Power, r3Power);
+  const strongestSupport = Math.max(s1Power, s2Power, s3Power);
+
+  if (!strongestResistance || !strongestSupport) {
     return {
       ratio: 0,
       text: '⚪ قوة الجاما: غير واضحة'
     };
   }
 
-  const directionText =
-    a.scoreData.bias === 'CALL'
-      ? 'الاتجاه الصاعد'
-      : 'الاتجاه الهابط';
+  // CALL: إذا أول مقاومة ضخمة جدًا مقارنة بالمقاومات بعدها = كابحة
+  if (bias === 'CALL') {
+    const nextResistance = Math.max(r2Power, r3Power, 1);
+    const capRatio = r1Power / nextResistance;
+    const supportRatio = strongestSupport / strongestResistance;
 
-  if (ratio >= 5) {
+    if (r1Power > 0 && capRatio >= 3) {
+      return {
+        ratio: capRatio,
+        text: '🔴 قوة الجاما: كابحة للحركة عند أول مقاومة'
+      };
+    }
+
+    if (supportRatio >= 5) {
+      return {
+        ratio: supportRatio,
+        text: '🟢 قوة الجاما: داعمة بقوة للاتجاه الصاعد'
+      };
+    }
+
+    if (supportRatio >= 1.5) {
+      return {
+        ratio: supportRatio,
+        text: '🟡 قوة الجاما: داعمة بشكل متوسط للاتجاه الصاعد'
+      };
+    }
+
     return {
-      ratio,
-      text: `🟢 قوة الجاما: داعمة بقوة لـ ${directionText}`
+      ratio: supportRatio,
+      text: '🔴 قوة الجاما: دعم الجاما للاتجاه الصاعد ضعيف'
     };
   }
 
-  if (ratio >= 1.5) {
+  // PUT: إذا أول دعم ضخم جدًا مقارنة بالدعوم بعدها = كابحة
+  if (bias === 'PUT') {
+    const nextSupport = Math.max(s2Power, s3Power, 1);
+    const capRatio = s1Power / nextSupport;
+    const resistanceRatio = strongestResistance / strongestSupport;
+
+    if (s1Power > 0 && capRatio >= 3) {
+      return {
+        ratio: capRatio,
+        text: '🔴 قوة الجاما: كابحة للحركة عند أول دعم'
+      };
+    }
+
+    if (resistanceRatio >= 5) {
+      return {
+        ratio: resistanceRatio,
+        text: '🟢 قوة الجاما: داعمة بقوة للاتجاه الهابط'
+      };
+    }
+
+    if (resistanceRatio >= 1.5) {
+      return {
+        ratio: resistanceRatio,
+        text: '🟡 قوة الجاما: داعمة بشكل متوسط للاتجاه الهابط'
+      };
+    }
+
     return {
-      ratio,
-      text: `🟡 قوة الجاما: داعمة بشكل متوسط لـ ${directionText}`
+      ratio: resistanceRatio,
+      text: '🔴 قوة الجاما: دعم الجاما للاتجاه الهابط ضعيف'
     };
   }
 
   return {
-    ratio,
-    text: `🔴 قوة الجاما: دعم الجاما لـ ${directionText} ضعيف`
+    ratio: 0,
+    text: '⚪ قوة الجاما: غير واضحة'
   };
 }
 
