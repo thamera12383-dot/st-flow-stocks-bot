@@ -321,6 +321,7 @@ async function remainingDays(userId) {
   const ms = Number(data.expires_at) - Date.now();
   return Math.max(0, Math.ceil(ms / (1000 * 60 * 60 * 24)));
 }
+
 // =====================
 // Admin Commands
 // =====================
@@ -380,7 +381,6 @@ bot.onText(/^\/codes$/i, async (msg) => {
 
   await bot.sendMessage(msg.chat.id, text);
 });
-
 bot.onText(/^\/users$/i, async (msg) => {
   if (!isAdmin(msg.from.id)) return;
 
@@ -714,6 +714,7 @@ function calculateTechnicalStop(bars, bias, entry, spot) {
     valid: false
   };
 }
+
 // =====================
 // GEX Core
 // =====================
@@ -829,7 +830,6 @@ function calculateNewPositions(volume, oi) {
     score: 0
   };
 }
-
 function calculateGex(data, liveSpot = null) {
   const results = data.results || [];
   const expInfo = getExpirationInfo(results);
@@ -1144,6 +1144,7 @@ async function calculateRealAskBidFlow(contracts) {
     contractsChecked
   };
 }
+
 // =====================
 // Score + Trade Plan
 // =====================
@@ -1316,7 +1317,6 @@ function buildTradePlan(a) {
     alt2: 'N/A'
   };
 }
-
 // =====================
 // Analysis
 // =====================
@@ -1430,6 +1430,7 @@ function buildFlowText(a) {
 
 📌 قد يظهر 0 إذا كان السوق مغلق أو لا توجد Trades/Quotes كافية خلال آخر ${FLOW_LOOKBACK_MINUTES} دقيقة`;
 }
+
 function getIntradayBalance(a) {
   const maxDistancePct = 0.02;
 
@@ -1461,6 +1462,63 @@ function getIntradayBalance(a) {
   };
 }
 
+function calculateGammaQuality(a) {
+  const resistances = (a.resistances || [])
+    .filter(x => x && Number.isFinite(Number(x.netGex)))
+    .map(x => Math.abs(Number(x.netGex)));
+
+  const supports = (a.supports || [])
+    .filter(x => x && Number.isFinite(Number(x.netGex)))
+    .map(x => Math.abs(Number(x.netGex)));
+
+  const strongestResistance = resistances.length ? Math.max(...resistances) : 0;
+  const strongestSupport = supports.length ? Math.max(...supports) : 0;
+
+  if (!strongestResistance || !strongestSupport || !a.scoreData?.bias) {
+    return {
+      ratio: 0,
+      text: '⚪ قوة الجاما: غير واضحة'
+    };
+  }
+
+  let ratio = 0;
+
+  if (a.scoreData.bias === 'CALL') {
+    ratio = strongestSupport / strongestResistance;
+  } else if (a.scoreData.bias === 'PUT') {
+    ratio = strongestResistance / strongestSupport;
+  } else {
+    return {
+      ratio: 0,
+      text: '⚪ قوة الجاما: غير واضحة'
+    };
+  }
+
+  const directionText =
+    a.scoreData.bias === 'CALL'
+      ? 'الاتجاه الصاعد'
+      : 'الاتجاه الهابط';
+
+  if (ratio >= 5) {
+    return {
+      ratio,
+      text: `🟢 قوة الجاما: داعمة بقوة لـ ${directionText}`
+    };
+  }
+
+  if (ratio >= 1.5) {
+    return {
+      ratio,
+      text: `🟡 قوة الجاما: داعمة بشكل متوسط لـ ${directionText}`
+    };
+  }
+
+  return {
+    ratio,
+    text: `🔴 قوة الجاما: دعم الجاما لـ ${directionText} ضعيف`
+  };
+}
+
 function buildMessage(symbol, a) {
   const score = a.scoreData;
   const plan = a.tradePlan;
@@ -1471,6 +1529,7 @@ function buildMessage(symbol, a) {
   const intradayBalance = getIntradayBalance(a);
 
   const gammaIcon = a.gammaRegime === 'Positive Gamma' ? '🟢' : '🔴';
+  const gammaQuality = calculateGammaQuality(a);
 
   const controller =
     score.bias === 'CALL'
@@ -1570,6 +1629,13 @@ ${s1?.strike || 'N/A'} ➜ ${r1?.strike || 'N/A'}
 ━━━━━━━━━━━━━━
 
 ${buildMiniChart(a.topLevels)}
+
+━━━━━━━━━━━━━━
+🧠 تقييم قوة الجاما
+━━━━━━━━━━━━━━
+
+${gammaQuality.text}
+📊 النسبة: ${fmt(gammaQuality.ratio)}x
 
 ━━━━━━━━━━━━━━
 📌 أسباب الاتجاه
@@ -1697,6 +1763,7 @@ bot.on('message', async (msg) => {
     );
   }
 });
+
 // =====================
 // Internal API For Unified Bot
 // =====================
