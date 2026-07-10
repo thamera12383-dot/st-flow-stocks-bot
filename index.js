@@ -1321,11 +1321,16 @@ function buildTradePlan(a) {
 // Analysis
 // =====================
 
-async function analyzeGex(symbol) {
+async function analyzeGex(symbol, options = {}) {
+  const forceFresh = options.forceFresh === true;
   const cacheKey = `${symbol}-${EXPIRATION_MODE}`;
   const cached = gexCache.get(cacheKey);
 
-  if (cached && Date.now() - cached.time < CACHE_MS) {
+  if (
+    !forceFresh &&
+    cached &&
+    Date.now() - cached.time < CACHE_MS
+  ) {
     return cached.data;
   }
 
@@ -1347,6 +1352,10 @@ async function analyzeGex(symbol) {
     liveSpot ||
     fallbackSpot ||
     null;
+
+  if (!finalSpot) {
+    throw new Error(`NO_LIVE_SPOT_FOR_${symbol}`);
+  }
 
   const analysis = calculateGex(data, finalSpot);
 
@@ -1716,6 +1725,54 @@ ${plan.direction}
 }
 
 // =====================
+// Decision Stop Review
+// =====================
+
+function buildGammaStopReviewResult(symbol, analysis, requestedSide) {
+  const side = String(analysis?.scoreData?.bias || 'NEUTRAL').toUpperCase();
+  const score = Number(analysis?.scoreData?.confidence || 0);
+  const normalizedRequestedSide = String(requestedSide || '').toUpperCase();
+  const gammaQuality = calculateGammaQuality(analysis);
+
+  const sameDirection =
+    ['CALL', 'PUT'].includes(side) &&
+    side === normalizedRequestedSide;
+
+  const supportsTrade =
+    sameDirection &&
+    score >= 6;
+
+  return {
+    source: 'GEX',
+    symbol,
+    requestedSide: normalizedRequestedSide,
+    side,
+    score,
+    supportsTrade,
+    sameDirection,
+    spot: Number(analysis?.spot || 0),
+    gammaRegime: analysis?.gammaRegime || null,
+    gammaFlip: Number(analysis?.flip?.strike || 0) || null,
+    callWall: Number(analysis?.realCallWall?.strike || 0) || null,
+    putWall: Number(analysis?.realPutWall?.strike || 0) || null,
+    totalGex: Number(analysis?.totalGex || 0),
+    totalDex: Number(analysis?.totalDex || 0),
+    callFlowPct: Number(analysis?.callFlowPct || 0),
+    putFlowPct: Number(analysis?.putFlowPct || 0),
+    realAskPct: Number(analysis?.realFlow?.askPct || 0),
+    realBidPct: Number(analysis?.realFlow?.bidPct || 0),
+    gammaQualityRatio: Number(gammaQuality?.ratio || 0),
+    gammaQualityText: gammaQuality?.text || null,
+    technicalStop: Number(analysis?.technicalStop?.price || 0) || null,
+    entry: Number(analysis?.tradePlan?.entry || 0) || null,
+    reasons: Array.isArray(analysis?.scoreData?.reasons)
+      ? analysis.scoreData.reasons
+      : [],
+    analyzedAt: new Date().toISOString()
+  };
+}
+
+// =====================
 // Manual Requests
 // =====================
 
@@ -1862,6 +1919,69 @@ app.get('/api/gamma', async (req, res) => {
     return res.status(500).json({
       ok: false,
       error: 'GAMMA_ANALYSIS_FAILED'
+    });
+  }
+});
+
+app.get('/api/gamma/stop-review', async (req, res) => {
+  try {
+    const key = String(req.query.key || '');
+    const symbol = String(req.query.symbol || '').trim().toUpperCase();
+    const requestedSide = String(req.query.side || '').trim().toUpperCase();
+
+    if (!GAMMA_API_SECRET || key !== GAMMA_API_SECRET) {
+      return res.status(401).json({
+        ok: false,
+        error: 'UNAUTHORIZED'
+      });
+    }
+
+    if (!isValidSymbol(symbol)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'INVALID_SYMBOL'
+      });
+    }
+
+    if (!['CALL', 'PUT'].includes(requestedSide)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'INVALID_SIDE'
+      });
+    }
+
+    console.log('GAMMA STOP REVIEW REQUEST:', {
+      symbol,
+      requestedSide
+    });
+
+    const analysis = await analyzeGex(symbol, {
+      forceFresh: true
+    });
+
+    const result = buildGammaStopReviewResult(
+      symbol,
+      analysis,
+      requestedSide
+    );
+
+    return res.json({
+      ok: true,
+      symbol,
+      purpose: 'STOP_REVIEW',
+      fresh: true,
+      result
+    });
+  } catch (err) {
+    console.error(
+      'GAMMA STOP REVIEW ERROR:',
+      err.response?.data || err.message
+    );
+
+    return res.status(500).json({
+      ok: false,
+      error: 'GAMMA_STOP_REVIEW_FAILED',
+      details: err.message
     });
   }
 });
