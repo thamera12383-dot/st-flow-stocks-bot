@@ -1883,6 +1883,10 @@ app.get('/api/gamma', async (req, res) => {
     const key = String(req.query.key || '');
     const symbol = String(req.query.symbol || '').trim().toUpperCase();
 
+    const silent =
+      String(req.query.silent || '') === '1' ||
+      String(req.query.silent || '').toLowerCase() === 'true';
+
     if (!GAMMA_API_SECRET || key !== GAMMA_API_SECRET) {
       return res.status(401).json({
         ok: false,
@@ -1900,17 +1904,24 @@ app.get('/api/gamma', async (req, res) => {
     const analysis = await analyzeGex(symbol);
     const reportText = buildMessage(symbol, analysis);
 
-    await saveDecisionMessage('GAMMA_API', symbol, reportText);
+    if (!silent) {
+      await saveDecisionMessage(
+        'GAMMA_API',
+        symbol,
+        reportText
+      );
 
-    await saveImageSnapshot({
-      symbol,
-      source: 'gamma_api',
-      messageText: reportText
-    });
+      await saveImageSnapshot({
+        symbol,
+        source: 'gamma_api',
+        messageText: reportText
+      });
+    }
 
     return res.json({
       ok: true,
       symbol,
+      silent,
       text: reportText
     });
   } catch (err) {
